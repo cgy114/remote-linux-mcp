@@ -114,6 +114,40 @@ hosts:
     });
   });
 
+  it('rejects a non-absolute defaults.default_cwd at load time as a schema error', async () => {
+    await write(`version: 1
+defaults:
+  default_cwd: relative/path
+hosts:
+  a: { host: h, user: u }
+`);
+    const err = await expectConfigError(loadConfig(paths), 'schema');
+    expect(JSON.stringify(err.issues)).toContain('default_cwd');
+  });
+
+  it('rejects "~user" defaults.default_cwd at load time', async () => {
+    await write(`version: 1
+defaults:
+  default_cwd: ~user
+hosts:
+  a: { host: h, user: u }
+`);
+    const err = await expectConfigError(loadConfig(paths), 'schema');
+    expect(JSON.stringify(err.issues)).toContain('default_cwd');
+  });
+
+  it('rejects a misshapen host default_cwd at load time', async () => {
+    await write(`version: 1
+hosts:
+  a:
+    host: h
+    user: u
+    default_cwd: relative
+`);
+    const err = await expectConfigError(loadConfig(paths), 'schema');
+    expect(JSON.stringify(err.issues)).toContain('default_cwd');
+  });
+
   it('rejects a missing version', async () => {
     await write('hosts:\n  a: { host: h, user: u }\n');
     const err = await expectConfigError(loadConfig(paths), 'schema');

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { classifyExit, stderrSignatures } from '../errors/classify.js';
 import { buildSshArgv, buildSshGArgv } from '../policy/argv.js';
+import { shSingleQuote } from '../policy/shell.js';
 import type {
   CheckFacts,
   EffectiveHost,
@@ -124,11 +125,6 @@ async function removeQuietly(file: string): Promise<void> {
   } catch {
     // 删除失败不影响结果
   }
-}
-
-/** 单引号安全转义，用于 POSIX sh 单词。 */
-function shSingleQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 // ---------- known_hosts 解析 ----------

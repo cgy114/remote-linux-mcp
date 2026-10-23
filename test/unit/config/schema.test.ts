@@ -80,6 +80,15 @@ describe('configSchema', () => {
       expect(ok(base({ defaults: { sudo: { nope: 1 } } }))).toBe(false);
     });
 
+    it('validates default_cwd shape like assertRemoteCwd', () => {
+      expect(ok(base({ defaults: { default_cwd: '~' } }))).toBe(true);
+      expect(ok(base({ defaults: { default_cwd: '~/proj' } }))).toBe(true);
+      expect(ok(base({ defaults: { default_cwd: '/srv/app' } }))).toBe(true);
+      expect(ok(base({ defaults: { default_cwd: 'relative/path' } }))).toBe(false);
+      expect(ok(base({ defaults: { default_cwd: '~user' } }))).toBe(false);
+      expect(ok(base({ defaults: { default_cwd: '/a\u0000b' } }))).toBe(false);
+    });
+
     it('accepts default_host only in alias shape', () => {
       expect(ok(base({ defaults: { default_host: 'web1' } }))).toBe(true);
       expect(ok(base({ defaults: { default_host: 'Bad Host' } }))).toBe(false);
@@ -133,6 +142,12 @@ describe('configSchema', () => {
     it('rejects a host longer than 255 characters and accepts 255', () => {
       expect(ok(base({ hosts: { a: { host: 'a'.repeat(256), user: 'u' } } }))).toBe(false);
       expect(ok(base({ hosts: { a: { host: 'a'.repeat(255), user: 'u' } } }))).toBe(true);
+    });
+
+    it('validates host default_cwd shape', () => {
+      expect(ok(base({ hosts: { a: { ...validHost, default_cwd: '~/x' } } }))).toBe(true);
+      expect(ok(base({ hosts: { a: { ...validHost, default_cwd: 'relative' } } }))).toBe(false);
+      expect(ok(base({ hosts: { a: { ...validHost, default_cwd: '~user' } } }))).toBe(false);
     });
 
     it('validates optional port range', () => {

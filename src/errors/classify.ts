@@ -2,11 +2,11 @@ import { redact } from '../log.js';
 import type { Logger, RunResult, SshSignatures, ErrorFacts, ErrorKind, ToolError } from '../types.js';
 import { makeToolError } from './taxonomy.js';
 
-const POLICY_REASON_RE = /^(invalid_|unknown_alias$|policy_)/;
+const POLICY_REASON_RE = /^(invalid_|unknown_alias$|policy_|command_too_large$|missing_host$)/;
 const HOSTKEY_REASONS = new Set(['not_registered', 'known_hosts_missing', 'fingerprint_mismatch']);
 
 const DNS_RE = /could not resolve hostname|name or service not known|nodename nor servname|temporary failure in name resolution/i;
-const TCP_RE = /connection refused|connection reset|no route to host|network is unreachable|connection closed by .* port/i;
+const TCP_RE = /connection refused|connection reset|no route to host|network is unreachable|connection closed by/i;
 const AUTH_RE = /permission denied \(publickey|too many authentication failures|load key|sign_and_send_pubkey|no such identity/i;
 const HOSTKEY_CHANGED_RE = /remote host identification has changed|host key verification failed|offending .* key in .*:(\d+)/i;
 const HOSTKEY_UNKNOWN_RE = /the authenticity of host|no .* host key is known|host key for .* has changed and you have requested strict checking/i;
@@ -16,6 +16,11 @@ const TIMEOUT_RE = /connection timed out|operation timed out|timeout, server .* 
 const OTHER_MAX_LINES = 3;
 const OTHER_MAX_LINE_CHARS = 300;
 const STDERR_TAIL_MAX_CHARS = 2000;
+
+const TRANSPORT_FAILURE_CODE = 'ssh_transport_failure';
+const TRANSPORT_FAILURE_MESSAGE = 'ssh 传输层失败（退出码 255）';
+const TRANSPORT_FAILURE_HINT =
+  'ssh 以 255 退出但 stderr 中没有可识别的认证/DNS/TCP/主机密钥特征。检查网络与目标 sshd 状态，并以 REMOTE_MCP_LOG_LEVEL=debug 重试查看详情。';
 
 /** 按 reason 给出的更具体指引（优先于类别 hint）。<alias> 由 formatToolError 在提供 alias 时替换。 */
 const REASON_HINTS: Record<string, string> = {
@@ -148,6 +153,16 @@ export function toUserError(facts: ErrorFacts, log?: Logger): ToolError {
       details['stderr'] = safe.length > STDERR_TAIL_MAX_CHARS ? safe.slice(-STDERR_TAIL_MAX_CHARS) : safe;
     }
     const err = makeToolError(kind, { details });
+    // 255 且无任何具体特征（Auth/DNS/TCP/HostKey/Timeout 等已优先分类）时，
+    // 统一归为 ssh 传输层失败，而非笼统的 Unknown。
+    if (
+      kind === 'Unknown' &&
+      (facts.exitCode === 255 || facts.reason === TRANSPORT_FAILURE_CODE)
+    ) {
+      err.code = TRANSPORT_FAILURE_CODE;
+      err.message = TRANSPORT_FAILURE_MESSAGE;
+      err.hint = TRANSPORT_FAILURE_HINT;
+    }
     const specificHint = typeof facts.reason === 'string' ? REASON_HINTS[facts.reason] : undefined;
     if (specificHint !== undefined) {
       err.hint = specificHint;

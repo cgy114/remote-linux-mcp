@@ -92,14 +92,11 @@ export function truncateOutput(
   );
 }
 
-/**
- * 收集流输出。超过 maxBytes 时只保留头部与尾部（内存有界），中间用标记替代。
- */
-export function captureStream(
+/** 收集流输出并统计收到的总字节数（含被截断部分）。 */
+function captureStreamCounted(
   stream: NodeJS.ReadableStream,
   maxBytes: number,
-  opts?: { onBytes?: (total: number) => void },
-): Promise<{ text: string; truncated: boolean }> {
+): Promise<{ text: string; truncated: boolean; bytes: number }> {
   return new Promise((resolve) => {
     const headCap = Math.floor(maxBytes / 2);
     const tailCap = maxBytes - headCap;
@@ -113,19 +110,21 @@ export function captureStream(
     const finish = (): void => {
       if (settled) return;
       settled = true;
-      try {
-        opts?.onBytes?.(total);
-      } catch {
-        // 回调失败不影响捕获结果
-      }
       const head = Buffer.concat(headChunks, headLen);
       const tailAll = Buffer.concat(tailChunks, tailLen);
       if (total <= maxBytes) {
         // 未超限：头部 + 尾部拼接即全部内容
-        resolve({ text: Buffer.concat([head, tailAll]).toString('utf8'), truncated: false });
+        resolve({
+          text: Buffer.concat([head, tailAll]).toString('utf8'),
+          truncated: false,
+          bytes: total,
+        });
         return;
       }
-      resolve(assembleTruncated(head, tailAll.subarray(tailAll.length - tailCap), total));
+      resolve({
+        ...assembleTruncated(head, tailAll.subarray(tailAll.length - tailCap), total),
+        bytes: total,
+      });
     };
 
     stream.on('data', (chunk: Buffer | string) => {
@@ -152,6 +151,18 @@ export function captureStream(
     stream.on('close', finish);
     stream.on('error', finish);
   });
+}
+
+/**
+ * 收集流输出。超过 maxBytes 时只保留头部与尾部（内存有界），中间用标记替代。
+ * 保持旧的 `{ text, truncated }` 形状；需要总字节数时使用内部的 counted 版本。
+ */
+export async function captureStream(
+  stream: NodeJS.ReadableStream,
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
+  const { text, truncated } = await captureStreamCounted(stream, maxBytes);
+  return { text, truncated };
 }
 
 // ---------- 超时与退出 ----------
@@ -304,14 +315,13 @@ export async function spawnCapture(input: {
     spawnError = { code: err.code ?? 'SPAWN_ERROR', message: err.message };
   });
 
-  let stdoutBytes = 0;
-  let stderrBytes = 0;
+  const emptyCapture = { text: '', truncated: false, bytes: 0 };
   const outP = child.stdout
-    ? captureStream(child.stdout, input.maxOutputBytes, { onBytes: (n) => (stdoutBytes = n) })
-    : Promise.resolve({ text: '', truncated: false });
+    ? captureStreamCounted(child.stdout, input.maxOutputBytes)
+    : Promise.resolve(emptyCapture);
   const errP = child.stderr
-    ? captureStream(child.stderr, input.maxOutputBytes, { onBytes: (n) => (stderrBytes = n) })
-    : Promise.resolve({ text: '', truncated: false });
+    ? captureStreamCounted(child.stderr, input.maxOutputBytes)
+    : Promise.resolve(emptyCapture);
 
   if (input.stdinData !== undefined) {
     // 子进程提前退出时写入会触发 EPIPE；吞掉，结果由 exitCode/spawnError 表达。
@@ -329,10 +339,7 @@ export async function spawnCapture(input: {
   const streams = exit.timedOut
     ? await Promise.race([settle, new Promise<null>((r) => setTimeout(() => r(null), EXIT_GRACE_MS))])
     : await settle;
-  const [out, err] = streams ?? [
-    { text: '', truncated: false },
-    { text: '', truncated: false },
-  ];
+  const [out, err] = streams ?? [emptyCapture, emptyCapture];
 
   const result: RunResult = {
     argv: fullArgv,
@@ -341,8 +348,8 @@ export async function spawnCapture(input: {
     signal: exit.signal,
     stdout: out.text,
     stderr: err.text,
-    stdoutBytes,
-    stderrBytes,
+    stdoutBytes: out.bytes,
+    stderrBytes: err.bytes,
     stdoutTruncated: out.truncated,
     stderrTruncated: err.truncated,
     timedOut: exit.timedOut,

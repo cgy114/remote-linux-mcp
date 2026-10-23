@@ -5,7 +5,12 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig, loadConfigLazy } from '../../src/config/load.js';
 import { resolvePaths } from '../../src/config/paths.js';
-import { buildExecCommand } from '../../src/policy/remote-command.js';
+import {
+  buildExecCommand,
+  DEFAULT_EXEC_LIMITS,
+  MAX_COMMAND_BYTES,
+  MAX_STDIN_BYTES,
+} from '../../src/policy/remote-command.js';
 import { effectiveHost } from '../../src/policy/target.js';
 import type { ToolContext } from '../../src/tools/common.js';
 import {
@@ -14,8 +19,18 @@ import {
   formatExecResult,
   resolveExecTarget,
   sshExec,
+  validateExecInput as validateToolExecInput,
 } from '../../src/tools/ssh-exec.js';
 import type { Logger, MCPPaths, RunResult } from '../../src/types.js';
+
+function codeOf(fn: () => unknown): string | undefined {
+  try {
+    fn();
+  } catch (e) {
+    return (e as { code?: string }).code ?? 'NO_CODE';
+  }
+  return undefined;
+}
 
 const { runSshMock } = vi.hoisted(() => ({ runSshMock: vi.fn() }));
 
@@ -153,6 +168,30 @@ describe('ssh_exec unit', () => {
     });
   });
 
+  describe('validateExecInput (tool front gate)', () => {
+    it('accepts input without cwd and leaves the real cwd to build time', () => {
+      expect(() => validateToolExecInput({ command: 'echo hi' })).not.toThrow();
+    });
+
+    it('rejects an explicit invalid cwd', () => {
+      expect(codeOf(() => validateToolExecInput({ command: 'echo hi', cwd: '~user' }))).toBe(
+        'invalid_cwd',
+      );
+    });
+
+    it('rejects an invalid host-level cwd during buildExecCommand', () => {
+      expect(
+        codeOf(() =>
+          buildExecCommand({
+            command: 'echo hi',
+            cwd: 'relative',
+            limits: DEFAULT_EXEC_LIMITS,
+          }),
+        ),
+      ).toBe('invalid_cwd');
+    });
+  });
+
   describe('execFailure', () => {
     it.each([0, 1, 7])('treats exit code %i as a normal remote result', (code) => {
       expect(execFailure(makeRun({ exitCode: code }))).toBeUndefined();
@@ -276,19 +315,25 @@ describe('ssh_exec unit', () => {
       const last = JSON.parse(lines[1] as string) as Record<string, unknown>;
       expect(last['tool']).toBe('ssh_exec');
       expect(last['alias']).toBe('web1');
-      expect(last['commandSha256']).toBe(
-        createHash('sha256').update('echo hi', 'utf8').digest('hex'),
-      );
-      expect(last).not.toHaveProperty('argv');
+      const sha = createHash('sha256').update('echo hi', 'utf8').digest('hex');
+      expect(last['commandSha256']).toBe(sha);
       expect(last).not.toHaveProperty('command');
+      // argv 已写入，且最后一项被替换为占位符，不落命令文本。
+      const argv = last['argv'] as string[];
+      expect(Array.isArray(argv)).toBe(true);
+      expect(argv[argv.length - 1]).toBe(`<redacted command sha256=${sha} bytes=7>`);
+      expect(last['queue_ms']).toBe(0);
       expect(JSON.stringify(last)).not.toContain('echo hi');
+      expect(JSON.stringify(last)).not.toContain('ping');
     });
 
-    it('exposes the expected size limits', () => {
+    it('exposes the expected size limits from the single source of truth', () => {
+      expect(EXEC_LIMITS.maxCommandBytes).toBe(MAX_COMMAND_BYTES);
+      expect(EXEC_LIMITS.maxStdinBytes).toBe(MAX_STDIN_BYTES);
       expect(EXEC_LIMITS.maxCommandBytes).toBe(16_384);
       expect(EXEC_LIMITS.maxStdinBytes).toBe(1_048_576);
-      expect(EXEC_LIMITS.maxRemoteUtf16).toBe(28_000);
-      expect(EXEC_LIMITS.maxRemoteUtf8).toBe(1_048_576);
+      expect(EXEC_LIMITS.maxRemoteUtf16).toBe(DEFAULT_EXEC_LIMITS.maxRemoteUtf16);
+      expect(EXEC_LIMITS.maxRemoteUtf8).toBe(DEFAULT_EXEC_LIMITS.maxRemoteUtf8);
     });
   });
 });

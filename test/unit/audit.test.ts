@@ -89,6 +89,30 @@ describe('buildExecAuditRecord', () => {
     expect(buildExecAuditRecord(baseRecordInput).outcome).toBe('spawn_error');
   });
 
+  it('records masked argv and queue_ms without leaking command text', () => {
+    const commandText = 'curl -H "Authorization: Bearer CANARY_TOKEN"';
+    const record = buildExecAuditRecord({
+      ...baseRecordInput,
+      run: { exitCode: 0, argv: ['ssh', '--', 'deploy@h', commandText] },
+      queueMs: 17,
+    });
+    expect(record.queue_ms).toBe(17);
+    expect(record.argv).toEqual([
+      'ssh',
+      '--',
+      'deploy@h',
+      `<redacted command sha256=${'a'.repeat(64)} bytes=12>`,
+    ]);
+    expect(JSON.stringify(record)).not.toContain('CANARY_TOKEN');
+    expect(JSON.parse(JSON.stringify(record))).toEqual(record);
+  });
+
+  it('omits argv and queue_ms when the run facts do not provide them', () => {
+    const record = buildExecAuditRecord(baseRecordInput);
+    expect(record).not.toHaveProperty('argv');
+    expect(record).not.toHaveProperty('queue_ms');
+  });
+
   it('copies run facts but never records content', () => {
     const record = buildExecAuditRecord({
       ...baseRecordInput,

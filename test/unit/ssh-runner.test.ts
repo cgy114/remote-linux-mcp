@@ -66,27 +66,13 @@ describe('captureStream', () => {
     expect(r).toEqual({ text, truncated: false });
   });
 
-  it('reports total bytes including the truncated portion', async () => {
-    let total = -1;
-    const r = await captureStream(streamOf([Buffer.alloc(300, 0x61), Buffer.alloc(200, 0x62)]), 40, {
-      onBytes: (n) => {
-        total = n;
-      },
-    });
-    expect(r.truncated).toBe(true);
-    expect(total).toBe(500);
-  });
-
-  it('reports the exact UTF-8 byte count', async () => {
-    let total = -1;
-    await captureStream(streamOf([Buffer.from('中文')]), 1000, {
-      onBytes: (n) => {
-        total = n;
-      },
-    });
-    expect(total).toBe(6);
+  it('returns exactly the legacy { text, truncated } shape', async () => {
+    const r = await captureStream(streamOf([Buffer.from('abc')]), 100);
+    expect(Object.keys(r).sort()).toEqual(['text', 'truncated']);
   });
 });
+
+// counted 版本的字节统计通过下方 spawnCapture 用例验证：超过上限时仍统计被截断的全部字节。
 
 describe('waitForExit', () => {
   it('times out, calls onTimeout exactly once, and marks timedOut', async () => {

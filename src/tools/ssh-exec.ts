@@ -3,11 +3,13 @@ import { z } from 'zod';
 import { appendAudit, auditFilePath, buildExecAuditRecord } from '../audit/audit.js';
 import { UsageError } from '../errors/classes.js';
 import { classifyExit, stderrSignatures, toUserError } from '../errors/classify.js';
-import { makeToolError } from '../errors/taxonomy.js';
 import { assertAlias } from '../policy/alias.js';
 import { buildSshArgv } from '../policy/argv.js';
 import {
   buildExecCommand,
+  DEFAULT_EXEC_LIMITS,
+  MAX_COMMAND_BYTES,
+  MAX_STDIN_BYTES,
   validateExecInput as validateRemoteCommandInput,
   type ExecCommandPlan,
   type ExecSizeLimits,
@@ -42,10 +44,9 @@ export interface ExecLimits extends ExecSizeLimits {
 }
 
 export const EXEC_LIMITS: ExecLimits = {
-  maxCommandBytes: 16_384,
-  maxStdinBytes: 1024 * 1024,
-  maxRemoteUtf16: 28_000,
-  maxRemoteUtf8: 1024 * 1024,
+  maxCommandBytes: MAX_COMMAND_BYTES,
+  maxStdinBytes: MAX_STDIN_BYTES,
+  ...DEFAULT_EXEC_LIMITS,
 };
 
 export interface ExecTarget {
@@ -75,16 +76,15 @@ export async function resolveExecTarget(
 }
 
 /**
- * 输入校验。命令/环境/stdin/cwd 的规则集中在 policy/remote-command，
- * 这里只补齐尚未解析出 host.cwd 时的占位 cwd（`/` 恒合法）。
+ * 前置输入校验。命令/环境/stdin/cwd 的规则集中在 policy/remote-command。
+ * 未提供 cwd 时不做 cwd 校验；真实 cwd（input.cwd ?? host.cwd）由 buildExecCommand 校验。
  */
-export function validateExecInput(input: SshExecInput, limits: ExecSizeLimits = EXEC_LIMITS): void {
+export function validateExecInput(input: SshExecInput): void {
   validateRemoteCommandInput({
     command: input.command,
-    cwd: input.cwd ?? '/',
+    ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
     ...(input.env !== undefined ? { env: input.env } : {}),
     ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),
-    limits: { maxRemoteUtf16: limits.maxRemoteUtf16, maxRemoteUtf8: limits.maxRemoteUtf8 },
   });
 }
 
@@ -95,7 +95,7 @@ export function validateExecInput(input: SshExecInput, limits: ExecSizeLimits = 
 export async function sshExec(input: SshExecInput, ctx: ToolContext): Promise<CallToolResult> {
   let alias: string | undefined;
   try {
-    validateExecInput(input, EXEC_LIMITS);
+    validateExecInput(input);
 
     const { host, destination } = await resolveExecTarget(input, ctx);
     alias = host.alias;
@@ -160,6 +160,7 @@ export async function sshExec(input: SshExecInput, ctx: ToolContext): Promise<Ca
           envKeys: plan.envKeys,
           stdinBytes: plan.stdinBytes,
           run,
+          queueMs: permit.queueMs,
           ...(failure !== undefined
             ? { failure: { code: failure.code, kind: failure.kind, message: failure.message } }
             : {}),
@@ -187,7 +188,7 @@ export async function sshExec(input: SshExecInput, ctx: ToolContext): Promise<Ca
 /**
  * 退出事实 -> ToolError。
  * spawn 失败 = Internal；超时 = Timeout；255 走 stderr 特征分类，无法识别时
- * 归为 Unknown 并给出 ssh_transport_failure；0–254 是远端命令结果，不是错误。
+ * classify/toUserError 统一归为 ssh_transport_failure；0–254 是远端命令结果，不是错误。
  */
 export function execFailure(run: RunResult, log?: Logger): ToolError | undefined {
   if (run.spawnError !== undefined) {
@@ -196,30 +197,19 @@ export function execFailure(run: RunResult, log?: Logger): ToolError | undefined
   if (run.timedOut) {
     return toUserError({ phase: 'exec', timedOut: true }, log);
   }
-  if (run.exitCode === 255) {
-    const base = toUserError(
-      {
-        phase: 'exec',
-        ...classifyExit(run),
-        stderr: run.stderr,
-        signatures: stderrSignatures(run.stderr),
-      },
-      log,
-    );
-    if (base.kind !== 'Unknown') return base;
-    const fallback = makeToolError('Unknown', {
-      code: 'ssh_transport_failure',
-      message: 'ssh 传输层失败（退出码 255）',
-    });
-    if (base.hint !== undefined) fallback.hint = base.hint;
-    if (base.details !== undefined) fallback.details = base.details;
-    return fallback;
-  }
   if (typeof run.exitCode === 'number' && run.exitCode >= 0 && run.exitCode <= 254) {
     return undefined;
   }
-  // null 退出码 / 被信号终止：按既有分类给出 Unknown 或相应类别。
-  return toUserError({ phase: 'exec', ...classifyExit(run), stderr: run.stderr }, log);
+  // 255 / null 退出码 / 被信号终止：交给统一分类；255 无特征时由 toUserError 覆盖为传输层失败。
+  return toUserError(
+    {
+      phase: 'exec',
+      ...classifyExit(run),
+      stderr: run.stderr,
+      signatures: stderrSignatures(run.stderr),
+    },
+    log,
+  );
 }
 
 export interface FormatExecResultInput {

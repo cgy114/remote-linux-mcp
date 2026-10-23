@@ -21,6 +21,8 @@ export interface AuditRunFacts {
   durationMs?: number;
   stdoutBytes?: number;
   stderrBytes?: number;
+  /** 完整 argv（含可执行文件）；写入记录时最后一项会被脱敏。 */
+  argv?: readonly string[];
 }
 
 export interface BuildExecAuditInput {
@@ -32,6 +34,8 @@ export interface BuildExecAuditInput {
   envKeys?: readonly string[];
   stdinBytes?: number;
   run?: AuditRunFacts;
+  /** 等待主机并发许可的毫秒数。 */
+  queueMs?: number;
   /** 未运行就失败时的错误元数据；message 不写入记录。 */
   failure?: { code?: string; kind?: string; message?: string };
   /** 覆盖时间戳（测试用）；默认当前时间。 */
@@ -55,6 +59,9 @@ export interface ExecAuditRecord {
   durationMs?: number;
   stdoutBytes?: number;
   stderrBytes?: number;
+  /** 脱敏后的 argv；最后一项为命令占位符。 */
+  argv?: string[];
+  queue_ms?: number;
   failureCode?: string;
   failureKind?: string;
 }
@@ -124,6 +131,10 @@ export function buildExecAuditRecord(input: BuildExecAuditInput): ExecAuditRecor
   if (input.run?.durationMs !== undefined) record.durationMs = input.run.durationMs;
   if (input.run?.stdoutBytes !== undefined) record.stdoutBytes = input.run.stdoutBytes;
   if (input.run?.stderrBytes !== undefined) record.stderrBytes = input.run.stderrBytes;
+  if (input.run !== undefined) {
+    record.argv = maskArgv(input.run.argv ?? [], input.commandSha256, input.commandBytes);
+  }
+  if (input.queueMs !== undefined) record.queue_ms = input.queueMs;
   if (input.failure?.code !== undefined) record.failureCode = input.failure.code;
   if (input.failure?.kind !== undefined) record.failureKind = input.failure.kind;
   return record;

@@ -223,12 +223,16 @@ describe('classify priority', () => {
     },
   );
 
-  it.each(['invalid_port', 'invalid_host', 'unknown_alias', 'policy_denied_cmd'])(
-    'reason %s maps to Policy regardless of phase',
-    (reason) => {
-      expect(classify({ phase: 'probe', reason })).toBe('Policy');
-    },
-  );
+  it.each([
+    'invalid_port',
+    'invalid_host',
+    'unknown_alias',
+    'policy_denied_cmd',
+    'command_too_large',
+    'missing_host',
+  ])('reason %s maps to Policy regardless of phase', (reason) => {
+    expect(classify({ phase: 'probe', reason })).toBe('Policy');
+  });
 
   it('reason sudo_prompt maps to SudoPrompt', () => {
     expect(classify({ phase: 'probe', reason: 'sudo_prompt' })).toBe('SudoPrompt');
@@ -252,6 +256,8 @@ describe('stderrSignatures with OpenSSH-style output', () => {
     ['ssh: connect to host 10.0.0.5 port 22: Network is unreachable', 'tcp'],
     ['kex_exchange_identification: read: Connection reset by peer', 'tcp'],
     ['Connection closed by 172.17.0.2 port 22', 'tcp'],
+    ['kex_exchange_identification: Connection closed by remote host', 'tcp'],
+    ['Connection closed by remote host', 'tcp'],
     ['deploy@172.17.0.2: Permission denied (publickey,password).', 'auth'],
     ['Received disconnect from 172.17.0.2 port 22:2: Too many authentication failures', 'auth'],
     ['Warning: Identity file /home/u/.ssh/id_x not accessible: No such file or directory.', 'other'],
@@ -367,6 +373,48 @@ describe('toUserError', () => {
     const err = toUserError({ phase: 'verify', signatures: sig({ auth: true }) });
     expect(err.kind).toBe('Auth');
     expect(err.code).toBe('auth_failed');
+  });
+
+  it('255 without any signature becomes ssh_transport_failure with an explanatory message/hint', () => {
+    const err = toUserError({
+      phase: 'exec',
+      exitCode: 255,
+      reason: 'ssh_transport_failure',
+      signatures: stderrSignatures('some unparsed failure'),
+    });
+    expect(err.kind).toBe('Unknown');
+    expect(err.code).toBe('ssh_transport_failure');
+    expect(err.message).toContain('传输层');
+    expect(err.hint).toContain('255');
+    expect(err.details?.['exitCode']).toBe(255);
+  });
+
+  it('255 with auth signature keeps the specific Auth classification', () => {
+    const err = toUserError({
+      phase: 'exec',
+      exitCode: 255,
+      reason: 'ssh_transport_failure',
+      signatures: stderrSignatures('deploy@h: Permission denied (publickey).'),
+    });
+    expect(err.kind).toBe('Auth');
+    expect(err.code).toBe('auth_failed');
+  });
+
+  it('255 with a TCP signature keeps the specific TCP classification', () => {
+    const err = toUserError({
+      phase: 'exec',
+      exitCode: 255,
+      reason: 'ssh_transport_failure',
+      signatures: stderrSignatures('kex_exchange_identification: Connection closed by remote host'),
+    });
+    expect(err.kind).toBe('TCP');
+    expect(err.code).toBe('tcp_failed');
+  });
+
+  it('reason ssh_transport_failure without exitCode still normalizes Unknown to the transport code', () => {
+    const err = toUserError({ phase: 'exec', reason: 'ssh_transport_failure' });
+    expect(err.kind).toBe('Unknown');
+    expect(err.code).toBe('ssh_transport_failure');
   });
 
   it('puts exitCode, timedOut into details', () => {

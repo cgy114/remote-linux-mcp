@@ -14,14 +14,20 @@ export const DEFAULT_EXEC_LIMITS: ExecSizeLimits = {
   maxRemoteUtf8: 1024 * 1024,
 };
 
-export interface ExecCommandInput {
+/** 前置校验所需的输入子集；cwd 可省略（真实 cwd 在构建阶段才确定）。 */
+export interface ExecValidationInput {
   command: string;
-  cwd: string;
+  /** 远端 cwd；省略时跳过 cwd 校验。 */
+  cwd?: string;
   env?: Record<string, string>;
   /** stdin 内容；提供时会校验字节数与 NUL。 */
   stdin?: string | Buffer;
   /** 未提供 stdin 内容时，可只声明字节数（≤1 MiB）。 */
   stdinBytes?: number;
+}
+
+export interface ExecCommandInput extends ExecValidationInput {
+  cwd: string;
   limits: ExecSizeLimits;
 }
 
@@ -36,8 +42,10 @@ export interface ExecCommandPlan {
   stdinBytes: number;
 }
 
-const MAX_COMMAND_BYTES = 16 * 1024;
-const MAX_STDIN_BYTES = 1024 * 1024;
+/** 单条命令的最大 UTF-8 字节数（16 KiB）。 */
+export const MAX_COMMAND_BYTES = 16 * 1024;
+/** stdin 内容的最大字节数（1 MiB）。 */
+export const MAX_STDIN_BYTES = 1024 * 1024;
 const MAX_ENV_BYTES = 16 * 1024;
 const MAX_ENV_ENTRIES = 64;
 const MAX_CWD_LENGTH = 4096;
@@ -92,8 +100,13 @@ function assertEnvValue(key: string, value: unknown): string {
   return value;
 }
 
-/** 校验 exec 输入；任何失败都以带 code 的 UsageError 抛出。 */
-export function validateExecInput(input: ExecCommandInput, _limits?: ExecSizeLimits): void {
+/** 校验远端 cwd（规则见 assertRemoteCwd）；失败抛 invalid_cwd。 */
+export function validateCwd(cwd: unknown): string {
+  return assertRemoteCwd(cwd);
+}
+
+/** 校验 exec 输入；cwd 省略时不校验 cwd。任何失败都以带 code 的 UsageError 抛出。 */
+export function validateExecInput(input: ExecValidationInput): void {
   const { command } = input;
   if (typeof command !== 'string' || command.length === 0) {
     throw usage('invalid_command', 'command must be a non-empty string');
@@ -143,11 +156,7 @@ export function validateExecInput(input: ExecCommandInput, _limits?: ExecSizeLim
     }
   }
 
-  assertRemoteCwd(input.cwd);
-
-  if (input.limits === undefined || input.limits === null) {
-    throw usage('command_too_large', 'exec size limits are required');
-  }
+  if (input.cwd !== undefined) validateCwd(input.cwd);
 }
 
 /** `~` -> `"$HOME"`；`~/x` -> `"$HOME"'/x'`；绝对路径 -> 单引号；`~user` 拒绝。 */
@@ -223,7 +232,7 @@ export function assertRemoteSize(remoteCommand: string, limits: ExecSizeLimits):
 
 /** 校验 -> 引用 -> 编码 -> 包装 -> 长度门限，返回可交给 ssh 的单条远端命令。 */
 export function buildExecCommand(input: ExecCommandInput): ExecCommandPlan {
-  validateExecInput(input, input.limits);
+  validateExecInput(input);
 
   const cwdExpr = renderCwd(input.cwd);
   const envLines = renderEnvExports(input.env);

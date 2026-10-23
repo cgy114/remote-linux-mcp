@@ -9,8 +9,11 @@ import {
   buildExecCommand,
   DEFAULT_EXEC_LIMITS,
   encodeScript,
+  MAX_COMMAND_BYTES,
+  MAX_STDIN_BYTES,
   renderCwd,
   renderEnvExports,
+  validateCwd,
   validateExecInput,
   wrapPayload,
   type ExecCommandInput,
@@ -70,6 +73,26 @@ describe('assertRemoteCwd', () => {
     for (const v of bad) {
       expect(codeOf(() => assertRemoteCwd(v))).toBe('invalid_cwd');
     }
+  });
+});
+
+describe('size constants', () => {
+  it('exports the single source of truth for command and stdin limits', () => {
+    expect(MAX_COMMAND_BYTES).toBe(16 * 1024);
+    expect(MAX_STDIN_BYTES).toBe(1024 * 1024);
+    expect(DEFAULT_EXEC_LIMITS.maxRemoteUtf8).toBe(MAX_STDIN_BYTES);
+  });
+});
+
+describe('validateCwd', () => {
+  it('accepts and returns a valid remote cwd', () => {
+    expect(validateCwd('/srv/app')).toBe('/srv/app');
+    expect(validateCwd('~')).toBe('~');
+  });
+
+  it('rejects invalid cwd with invalid_cwd', () => {
+    expect(codeOf(() => validateCwd('relative'))).toBe('invalid_cwd');
+    expect(codeOf(() => validateCwd('~user'))).toBe('invalid_cwd');
   });
 });
 
@@ -169,6 +192,11 @@ describe('validateExecInput', () => {
   it('rejects an invalid cwd', () => {
     expect(codeOf(() => validateExecInput(input({ cwd: '~user' })))).toBe('invalid_cwd');
     expect(codeOf(() => validateExecInput(input({ cwd: 'relative' })))).toBe('invalid_cwd');
+  });
+
+  it('skips cwd validation entirely when cwd is omitted', () => {
+    expect(() => validateExecInput({ command: 'echo hi' })).not.toThrow();
+    expect(() => validateExecInput({ command: 'echo hi', env: { A: '1' } })).not.toThrow();
   });
 });
 
@@ -313,23 +341,43 @@ describe('encodeScript properties', () => {
 
 const bashAvailable = (() => {
   try {
-    const r = spawnSync('bash', ['-c', 'printf ok'], { encoding: 'buffer' });
+    const r = spawnSync('bash', ['-c', 'printf ok']);
     return r.error === undefined && r.status === 0 && r.stdout.toString() === 'ok';
   } catch {
     return false;
   }
 })();
 
+// Windows 上 `bash` 可能解析到 WSL，单次 spawn 约 1.5–2s；因此批量：一次 spawn
+// 处理全部样本（每行一个 payload，payload 不含换行/NUL 且不含单引号），输出 hex 逐条比对。
 describe('encodeScript differential vs bash printf %b', () => {
-  it.skipIf(!bashAvailable)('matches bash output for arbitrary text', () => {
-    fc.assert(
-      fc.property(wellFormedNoNul, (script) => {
-        const payload = encodeScript(script);
-        const r = spawnSync('bash', ['-c', `printf %b "${payload}"`], { encoding: 'buffer' });
-        expect(r.status).toBe(0);
-        expect(r.stdout).toEqual(Buffer.from(script, 'utf8'));
-      }),
-      { numRuns: 40 },
-    );
-  });
+  it.skipIf(!bashAvailable)(
+    'matches bash output for arbitrary text in a single batch spawn',
+    { timeout: 60_000 },
+    () => {
+      const samples = fc.sample(wellFormedNoNul, { numRuns: 40 });
+      const payloads = samples.map((script) => encodeScript(script));
+      const script = `while IFS= read -r p; do printf %b "$p" | od -An -v -tx1 | tr -d '[:space:]'; printf '\\n'; done`;
+
+      const started = Date.now();
+      const r = spawnSync('bash', ['-c', script], {
+        input: `${payloads.join('\n')}\n`,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      const elapsedMs = Date.now() - started;
+      console.log(`[bash-diff] ${samples.length} samples in ${elapsedMs}ms (1 bash spawn)`);
+
+      expect(r.status).toBe(0);
+      const lines = r.stdout.toString('utf8').split('\n');
+      while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+      expect(lines).toHaveLength(samples.length);
+
+      samples.forEach((scriptText, i) => {
+        const actual = Buffer.from(lines[i] as string, 'hex');
+        expect(actual, `sample #${i} ${JSON.stringify(scriptText)}`).toEqual(
+          Buffer.from(scriptText, 'utf8'),
+        );
+      });
+    },
+  );
 });

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ConfigError } from '../errors/classes.js';
+import { assertRemoteCwd } from '../policy/remote-command.js';
 import type { Defaults } from '../types.js';
 
 /** host alias：小写字母数字开头，后续允许 . _ -，最长 64。 */
@@ -14,6 +15,22 @@ const USER_RE = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$/;
 
 const portSchema = z.number().int().min(1).max(65535);
 const positiveIntSchema = z.number().int().positive();
+
+/**
+ * 远端 cwd 的配置侧格式校验：与 assertRemoteCwd 完全一致
+ * （以 `/` 或 `~` 开头、拒绝 `~user`、≤4096、无 NUL/CR/LF/孤立 surrogate）。
+ * 在加载期以 ConfigError('schema') 暴露，而不是等到首次执行才失败。
+ */
+const cwdSchema = z.string().min(1).superRefine((value, ctx) => {
+  try {
+    assertRemoteCwd(value);
+  } catch (err) {
+    ctx.addIssue({
+      code: 'custom',
+      message: err instanceof Error ? err.message : 'invalid remote cwd',
+    });
+  }
+});
 
 export const aliasSchema = z
   .string()
@@ -35,7 +52,7 @@ const sudoSchema = z.strictObject({
 
 const defaultsSchema = z.strictObject({
   port: portSchema.optional(),
-  default_cwd: z.string().min(1).optional(),
+  default_cwd: cwdSchema.optional(),
   default_host: aliasSchema.optional(),
   timeouts: timeoutsSchema.optional(),
   max_output_bytes: z.number().int().min(4096).max(8388608).optional(),
@@ -58,7 +75,7 @@ const hostSchema = z.strictObject({
   port: portSchema.optional(),
   identity_file: z.string().min(1).optional(),
   proxy_jump: z.string().optional(),
-  default_cwd: z.string().min(1).optional(),
+  default_cwd: cwdSchema.optional(),
   description: z.string().optional(),
 });
 
