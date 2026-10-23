@@ -1,5 +1,6 @@
 import path from 'node:path';
 import type { EffectiveHost } from '../types.js';
+import { shSingleQuote } from './shell.js';
 
 export type SshMode = 'strict' | 'accept-new';
 
@@ -104,5 +105,5 @@ export function assertArgvSafe(argv: readonly string[]): void {
 
 function quoteForDisplay(arg: string): string {
   if (arg.length > 0 && DISPLAY_SAFE_RE.test(arg)) return arg;
-  return `'${arg.split("'").join(`'\\''`)}'`;
+  return shSingleQuote(arg);
 }

@@ -2,12 +2,11 @@ import type { CallToolResult } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { classifyExit, stderrSignatures, toUserError } from '../errors/classify.js';
 import { assertAlias } from '../policy/alias.js';
-import { assertTarget, checkTrustState, effectiveHost, selectJumpSpec, type TrustCheck } from '../policy/target.js';
+import { assertTarget, effectiveHost, selectJumpSpec } from '../policy/target.js';
 import { preflightAuth, preflightJump } from '../ssh/preflight.js';
 import { parseCheckOutput, runHostCheckProbe } from '../ssh/probe.js';
-import { readKnownHosts } from '../trust/known-hosts.js';
-import { loadTrustRegistry } from '../trust/registry.js';
-import type { EffectiveHost, ErrorFacts } from '../types.js';
+import { evaluateTrust } from '../trust/gate.js';
+import type { ErrorFacts } from '../types.js';
 import { singleFlight } from '../util/inflight.js';
 import { errorToToolError, toolErrorResult, type ToolContext } from './common.js';
 import { formatCheckResult } from './format.js';
@@ -38,7 +37,7 @@ async function runCheck(alias: string, ctx: ToolContext): Promise<CallToolResult
   assertTarget({ user: host.user, host: host.host, port: host.port, jumps });
 
   // 3. 信任门禁：登记簿 + 专用 known_hosts。读取失败按 fail-closed 处理。
-  const trust = await evaluateTrust(alias, host, ctx);
+  const trust = await evaluateTrust({ alias: host.alias, host, paths: ctx.paths, log: ctx.log });
   if (!trust.ok) {
     const fact = trust.fact;
     return toolErrorResult(
@@ -84,26 +83,4 @@ async function runCheck(alias: string, ctx: ToolContext): Promise<CallToolResult
   // 8. 成功：解析并格式化
   const facts = parseCheckOutput(run.stdout);
   return formatCheckResult({ alias, ok: true, facts, latencyMs: run.durationMs });
-}
-
-/** 读取登记簿与 known_hosts 并调用 checkTrustState。读取异常 -> fail-closed 的 not_registered。 */
-async function evaluateTrust(
-  alias: string,
-  host: EffectiveHost,
-  ctx: ToolContext,
-): Promise<TrustCheck> {
-  try {
-    const registry = await loadTrustRegistry(ctx.paths.trustRegistryFile);
-    const { entries } = await readKnownHosts(ctx.paths.knownHostsFile);
-    return checkTrustState({ alias: host.alias, host, registry, knownHosts: entries });
-  } catch (err) {
-    ctx.log.warn({ alias, err: err instanceof Error ? err.message : String(err) }, 'trust state unreadable; failing closed');
-    return {
-      ok: false,
-      fact: {
-        reason: 'not_registered',
-        stderr: `trust state could not be read: ${err instanceof Error ? err.message : String(err)}`,
-      },
-    };
-  }
 }

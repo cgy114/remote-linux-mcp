@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { shSingleQuote } from '../policy/shell.js';
 import type { RunResult } from '../types.js';
 import { resolveSshBinary, resolveToolBinary } from './binary.js';
 
@@ -97,6 +98,7 @@ export function truncateOutput(
 export function captureStream(
   stream: NodeJS.ReadableStream,
   maxBytes: number,
+  opts?: { onBytes?: (total: number) => void },
 ): Promise<{ text: string; truncated: boolean }> {
   return new Promise((resolve) => {
     const headCap = Math.floor(maxBytes / 2);
@@ -111,6 +113,11 @@ export function captureStream(
     const finish = (): void => {
       if (settled) return;
       settled = true;
+      try {
+        opts?.onBytes?.(total);
+      } catch {
+        // 回调失败不影响捕获结果
+      }
       const head = Buffer.concat(headChunks, headLen);
       const tailAll = Buffer.concat(tailChunks, tailLen);
       if (total <= maxBytes) {
@@ -255,7 +262,7 @@ export async function killTree(pid: number, toolPath: string): Promise<void> {
 /** 为 displayCommand 做安全拼接：含空白、引号或为空的元素用单引号包裹。 */
 function quoteArg(s: string): string {
   if (s.length > 0 && !/[\s'"]/.test(s)) return s;
-  return `'${s.replace(/'/g, `'\\''`)}'`;
+  return shSingleQuote(s);
 }
 
 export async function spawnCapture(input: {
@@ -266,6 +273,8 @@ export async function spawnCapture(input: {
   maxOutputBytes: number;
   cwd?: string;
   stdin?: 'ignore' | 'pipe';
+  /** 有值时以 pipe 打开 stdin，写入后关闭；写入错误（如 EPIPE）被吞掉。 */
+  stdinData?: string | Buffer;
 }): Promise<RunResult> {
   const started = Date.now();
   const fullArgv = [input.file, ...input.argv];
@@ -280,12 +289,13 @@ export async function spawnCapture(input: {
     }
   }
 
+  const stdinMode = input.stdinData !== undefined ? 'pipe' : (input.stdin ?? 'ignore');
   const child = spawn(input.file, [...input.argv], {
     shell: false,
     windowsHide: true,
     env: input.env,
     cwd: input.cwd,
-    stdio: [input.stdin ?? 'ignore', 'pipe', 'pipe'],
+    stdio: [stdinMode, 'pipe', 'pipe'],
   });
   const untrack = trackChild(child);
 
@@ -294,8 +304,20 @@ export async function spawnCapture(input: {
     spawnError = { code: err.code ?? 'SPAWN_ERROR', message: err.message };
   });
 
-  const outP = child.stdout ? captureStream(child.stdout, input.maxOutputBytes) : Promise.resolve({ text: '', truncated: false });
-  const errP = child.stderr ? captureStream(child.stderr, input.maxOutputBytes) : Promise.resolve({ text: '', truncated: false });
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  const outP = child.stdout
+    ? captureStream(child.stdout, input.maxOutputBytes, { onBytes: (n) => (stdoutBytes = n) })
+    : Promise.resolve({ text: '', truncated: false });
+  const errP = child.stderr
+    ? captureStream(child.stderr, input.maxOutputBytes, { onBytes: (n) => (stderrBytes = n) })
+    : Promise.resolve({ text: '', truncated: false });
+
+  if (input.stdinData !== undefined) {
+    // 子进程提前退出时写入会触发 EPIPE；吞掉，结果由 exitCode/spawnError 表达。
+    child.stdin?.on('error', () => undefined);
+    child.stdin?.end(input.stdinData);
+  }
 
   const exit = await waitForExit(child, input.timeoutMs, () =>
     child.pid !== undefined ? killTree(child.pid, taskkillPath) : undefined,
@@ -319,6 +341,8 @@ export async function spawnCapture(input: {
     signal: exit.signal,
     stdout: out.text,
     stderr: err.text,
+    stdoutBytes,
+    stderrBytes,
     stdoutTruncated: out.truncated,
     stderrTruncated: err.truncated,
     timedOut: exit.timedOut,
@@ -335,6 +359,7 @@ export async function runSsh(input: {
   maxOutputBytes: number;
   env: NodeJS.ProcessEnv;
   cwd?: string;
+  stdinData?: string | Buffer;
   label: string;
 }): Promise<RunResult> {
   const { path: sshPath } = await resolveSshBinary();
@@ -345,5 +370,6 @@ export async function runSsh(input: {
     timeoutMs: input.timeoutMs,
     maxOutputBytes: input.maxOutputBytes,
     cwd: input.cwd,
+    ...(input.stdinData !== undefined ? { stdinData: input.stdinData } : {}),
   });
 }

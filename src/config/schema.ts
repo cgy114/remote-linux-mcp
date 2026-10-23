@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ConfigError } from '../errors/classes.js';
 import type { Defaults } from '../types.js';
 
 /** host alias：小写字母数字开头，后续允许 . _ -，最长 64。 */
@@ -35,6 +36,7 @@ const sudoSchema = z.strictObject({
 const defaultsSchema = z.strictObject({
   port: portSchema.optional(),
   default_cwd: z.string().min(1).optional(),
+  default_host: aliasSchema.optional(),
   timeouts: timeoutsSchema.optional(),
   max_output_bytes: z.number().int().min(4096).max(8388608).optional(),
   sudo: sudoSchema.optional(),
@@ -86,7 +88,13 @@ export function defaultsFor(raw: RawConfig): Defaults {
     deny: [...(s?.deny ?? [])],
   };
   if (s?.credential !== undefined) sudo.credential = s.credential;
-  return {
+
+  const defaultHost = d?.default_host;
+  if (defaultHost !== undefined && !Object.prototype.hasOwnProperty.call(raw.hosts, defaultHost)) {
+    throw new ConfigError('schema', `defaults.default_host "${defaultHost}" is not defined in hosts`);
+  }
+
+  const defaults: Defaults = {
     port: d?.port ?? 22,
     defaultCwd: d?.default_cwd ?? '~',
     timeouts: {
@@ -97,4 +105,6 @@ export function defaultsFor(raw: RawConfig): Defaults {
     maxOutputBytes: d?.max_output_bytes ?? 1048576,
     sudo,
   };
+  if (defaultHost !== undefined) defaults.defaultHost = defaultHost;
+  return defaults;
 }

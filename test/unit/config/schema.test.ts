@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ConfigError } from '../../../src/errors/classes.js';
 import { configSchema, defaultsFor } from '../../../src/config/schema.js';
 
 const validHost = { host: '10.0.0.5', user: 'deploy' };
@@ -77,6 +78,12 @@ describe('configSchema', () => {
     it('rejects unknown fields inside defaults and sudo', () => {
       expect(ok(base({ defaults: { nope: 1 } }))).toBe(false);
       expect(ok(base({ defaults: { sudo: { nope: 1 } } }))).toBe(false);
+    });
+
+    it('accepts default_host only in alias shape', () => {
+      expect(ok(base({ defaults: { default_host: 'web1' } }))).toBe(true);
+      expect(ok(base({ defaults: { default_host: 'Bad Host' } }))).toBe(false);
+      expect(ok(base({ defaults: { default_host: 'default' } }))).toBe(false);
     });
   });
 
@@ -188,6 +195,29 @@ describe('defaultsFor', () => {
       maxOutputBytes: 1048576,
       sudo: { mode: 'off', allow: [], deny: [] },
     });
+  });
+
+  it('includes defaultHost only when default_host is defined and points at a known alias', () => {
+    const raw = configSchema.parse(base({ defaults: { default_host: 'web1' } }));
+    const defaults = defaultsFor(raw);
+    expect(defaults.defaultHost).toBe('web1');
+    expect(defaults.port).toBe(22);
+  });
+
+  it('omits the defaultHost key entirely when default_host is absent', () => {
+    const defaults = defaultsFor(configSchema.parse(base()));
+    expect(Object.prototype.hasOwnProperty.call(defaults, 'defaultHost')).toBe(false);
+  });
+
+  it('rejects a default_host that is not defined in hosts', () => {
+    const raw = configSchema.parse(base({ defaults: { default_host: 'ghost' } }));
+    try {
+      defaultsFor(raw);
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigError);
+      expect((e as ConfigError).code).toBe('schema');
+    }
   });
 
   it('keeps explicit values and includes sudo credential/allow/deny when set', () => {

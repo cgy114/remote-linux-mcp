@@ -66,17 +66,29 @@ export function errorToToolError(e: unknown, log?: Logger): ToolError {
   return toUserError({ phase: 'probe', spawnError: { code: 'internal', message: String(e) } });
 }
 
+/** MCP tool annotation hints; omitted hints keep the protocol default. */
+export interface ToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
 export interface ToolDefinition<I> {
   name: string;
   title: string;
   description: string;
   inputSchema: ZodType<I>;
+  annotations?: ToolAnnotations;
   handler: (input: I, ctx: ToolContext) => Promise<CallToolResult>;
 }
 
-function aliasOf(args: unknown): string | undefined {
-  if (typeof args === 'object' && args !== null && 'alias' in args) {
-    const v = (args as { alias?: unknown }).alias;
+/** 错误渲染用：同时识别 `alias` 与 `host` 两种输入字段名。 */
+export function aliasOf(args: unknown): string | undefined {
+  if (typeof args !== 'object' || args === null) return undefined;
+  const record = args as Record<string, unknown>;
+  for (const key of ['alias', 'host']) {
+    const v = record[key];
     if (typeof v === 'string') return v;
   }
   return undefined;
@@ -94,7 +106,7 @@ export function registerTool<I>(server: McpServer, def: ToolDefinition<I>, ctx: 
       title: def.title,
       description: def.description,
       inputSchema: def.inputSchema as unknown as StandardSchemaWithJSON,
-      annotations: { readOnlyHint: true },
+      annotations: def.annotations ?? { readOnlyHint: true },
     },
     async (args: unknown): Promise<CallToolResult> => {
       const started = Date.now();

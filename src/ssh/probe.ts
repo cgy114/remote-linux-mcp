@@ -53,6 +53,8 @@ function syntheticFailure(code: string, message: string): RunResult {
     signal: null,
     stdout: '',
     stderr: '',
+    stdoutBytes: 0,
+    stderrBytes: 0,
     stdoutTruncated: false,
     stderrTruncated: false,
     timedOut: false,

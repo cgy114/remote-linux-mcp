@@ -65,6 +65,27 @@ describe('captureStream', () => {
     const r = await captureStream(streamOf([Buffer.from(text, 'utf8')]), 1000);
     expect(r).toEqual({ text, truncated: false });
   });
+
+  it('reports total bytes including the truncated portion', async () => {
+    let total = -1;
+    const r = await captureStream(streamOf([Buffer.alloc(300, 0x61), Buffer.alloc(200, 0x62)]), 40, {
+      onBytes: (n) => {
+        total = n;
+      },
+    });
+    expect(r.truncated).toBe(true);
+    expect(total).toBe(500);
+  });
+
+  it('reports the exact UTF-8 byte count', async () => {
+    let total = -1;
+    await captureStream(streamOf([Buffer.from('中文')]), 1000, {
+      onBytes: (n) => {
+        total = n;
+      },
+    });
+    expect(total).toBe(6);
+  });
 });
 
 describe('waitForExit', () => {
@@ -120,6 +141,53 @@ describe('spawnCapture', () => {
     });
     expect(r.spawnError).toBeDefined();
     expect(r.exitCode).toBeNull();
+    expect(r.stdoutBytes).toBe(0);
+    expect(r.stderrBytes).toBe(0);
+  });
+
+  it('writes stdinData and captures the echoed response', async () => {
+    const r = await spawnCapture({
+      file: process.execPath,
+      argv: [
+        '-e',
+        "let d='';process.stdin.setEncoding('utf8');process.stdin.on('data',(c)=>{d+=c});process.stdin.on('end',()=>{process.stdout.write(d.toUpperCase())})",
+      ],
+      env: env(),
+      timeoutMs: 10_000,
+      maxOutputBytes: 1024,
+      stdinData: 'hello stdin',
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe('HELLO STDIN');
+    expect(r.stdoutBytes).toBe(11);
+    expect(r.stderrBytes).toBe(0);
+  });
+
+  it('counts received bytes even when output is truncated', async () => {
+    const r = await spawnCapture({
+      file: process.execPath,
+      argv: ['-e', "process.stdout.write('x'.repeat(1000));process.stderr.write('y'.repeat(500))"],
+      env: env(),
+      timeoutMs: 10_000,
+      maxOutputBytes: 100,
+    });
+    expect(r.stdoutTruncated).toBe(true);
+    expect(r.stderrTruncated).toBe(true);
+    expect(r.stdoutBytes).toBe(1000);
+    expect(r.stderrBytes).toBe(500);
+  });
+
+  it('swallows EPIPE when the child exits without reading stdin', async () => {
+    const r = await spawnCapture({
+      file: process.execPath,
+      argv: ['-e', 'process.exit(0)'],
+      env: env(),
+      timeoutMs: 10_000,
+      maxOutputBytes: 1024,
+      stdinData: 'x'.repeat(1024 * 1024),
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.spawnError).toBeUndefined();
   });
 });
 

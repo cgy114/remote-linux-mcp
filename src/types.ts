@@ -33,7 +33,7 @@ export interface SshSignatures {
 }
 
 export interface ErrorFacts {
-  phase: 'trust' | 'preflight' | 'jump' | 'probe' | 'verify' | 'config';
+  phase: 'trust' | 'preflight' | 'jump' | 'probe' | 'verify' | 'config' | 'exec';
   exitCode?: number | null;
   timedOut?: boolean;
   signal?: string | null;
@@ -50,6 +50,10 @@ export interface RunResult {
   signal: string | null;
   stdout: string;
   stderr: string;
+  /** Total bytes actually received from the stream (including truncated bytes). */
+  stdoutBytes: number;
+  /** Total bytes actually received from the stream (including truncated bytes). */
+  stderrBytes: number;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
   timedOut: boolean;
@@ -69,6 +73,7 @@ export interface MCPPaths {
 export interface Defaults {
   port: number;
   defaultCwd: string;
+  defaultHost?: string;
   timeouts: { connectMs: number; commandMs: number; checkMs: number };
   maxOutputBytes: number;
   sudo: {

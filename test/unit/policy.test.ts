@@ -505,6 +505,14 @@ describe('buildSshArgv', () => {
     expect(display.endsWith(" ''")).toBe(true);
   });
 
+  it('single-quotes display arguments containing apostrophes', () => {
+    const { display } = buildSshArgv({
+      ...base,
+      host: makeHost({ identityFile: "/home/o'neil key" }),
+    });
+    expect(display).toContain(`'/home/o'\\''neil key'`);
+  });
+
   it('refuses a destination that starts with "-"', () => {
     expect(() => buildSshArgv({ ...base, host: makeHost({ user: '-x' }) })).toThrow();
   });
