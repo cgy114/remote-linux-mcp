@@ -1,10 +1,22 @@
 import type { CallToolResult } from '@modelcontextprotocol/server';
+import { serializeError } from '../log.js';
 import type { HostLimiter } from '../ssh/host-limiter.js';
 import { errorToToolError, toolErrorResult, type ToolContext } from '../tools/common.js';
 import type { ToolError } from '../types.js';
 import { withHostLease, type HostLease } from './lease.js';
 import { resolveTarget, type ResolvedTarget } from './target.js';
 import { checkTrust, trustFactToToolError } from './trust.js';
+
+export type DeniedPhase = 'resolve' | 'trust' | 'prepare';
+
+/** 租约之外被拒绝时传给 auditDenied 的事实（spawn 之前）。 */
+export interface AuditDeniedArgs {
+  input: { host?: string };
+  ctx: ToolContext;
+  phase: DeniedPhase;
+  error: ToolError;
+  target?: ResolvedTarget;
+}
 
 /** audit / format 阶段可见的全部事实。 */
 export interface OperationArgs<Plan, Produced> {
@@ -33,7 +45,36 @@ export interface SshOperationHooks<Plan, Produced> {
   classifyFailure?: (produced: Produced) => ToolError | undefined;
   /** 审计（不抛）：appendAudit 永不 reject，其他异常由外层 catch 兜底。 */
   audit?: (args: OperationArgs<Plan, Produced>) => Promise<void> | void;
+  /** 在 resolveTarget / trust / prepare 失败（spawn 之前）时调用；自身异常被吞掉。 */
+  auditDenied?: (args: AuditDeniedArgs) => Promise<void> | void;
   format: (args: OperationArgs<Plan, Produced>) => CallToolResult;
+}
+
+async function notifyDenied<Plan, Produced>(
+  hooks: SshOperationHooks<Plan, Produced>,
+  phase: DeniedPhase,
+  error: ToolError,
+  target: ResolvedTarget | undefined,
+): Promise<void> {
+  if (hooks.auditDenied === undefined) return;
+  try {
+    await hooks.auditDenied({
+      input: hooks.input,
+      ctx: hooks.ctx,
+      phase,
+      error,
+      ...(target !== undefined ? { target } : {}),
+    });
+  } catch (err) {
+    try {
+      hooks.ctx.log.warn(
+        { err: serializeError(err), phase },
+        'auditDenied hook failed',
+      );
+    } catch {
+      // 日志失败不影响主流程
+    }
+  }
 }
 
 /**
@@ -44,30 +85,38 @@ export async function runSshOperation<Plan, Produced>(
   hooks: SshOperationHooks<Plan, Produced>,
 ): Promise<CallToolResult> {
   let alias: string | undefined;
+  let phase: DeniedPhase | 'execute' = 'resolve';
+  let target: ResolvedTarget | undefined;
   try {
-    const target = await resolveTarget(hooks.input, hooks.ctx);
-    alias = target.host.alias;
+    const resolved = await resolveTarget(hooks.input, hooks.ctx);
+    target = resolved;
+    alias = resolved.host.alias;
 
+    phase = 'trust';
     const trust = await checkTrust({
-      alias: target.host.alias,
-      host: target.host,
+      alias: resolved.host.alias,
+      host: resolved.host,
       paths: hooks.ctx.paths,
       log: hooks.ctx.log,
     });
     if (!trust.ok) {
-      return toolErrorResult(trustFactToToolError(trust.fact, hooks.ctx.log), alias);
+      const error = trustFactToToolError(trust.fact, hooks.ctx.log);
+      await notifyDenied(hooks, 'trust', error, resolved);
+      return toolErrorResult(error, alias);
     }
 
     // 准备阶段在租约外：慢速校验不应占住主机并发槽位。
-    const plan = await hooks.prepare(target);
+    phase = 'prepare';
+    const plan = await hooks.prepare(resolved);
 
+    phase = 'execute';
     return await withHostLease(
-      target.destination,
+      resolved.destination,
       async (lease) => {
-        const produced = await hooks.execute({ target, plan, lease });
+        const produced = await hooks.execute({ target: resolved, plan, lease });
         const failure = hooks.classifyFailure?.(produced);
         const args: OperationArgs<Plan, Produced> = {
-          target,
+          target: resolved,
           plan,
           produced,
           lease,
@@ -79,6 +128,8 @@ export async function runSshOperation<Plan, Produced>(
       hooks.limiter,
     );
   } catch (e) {
-    return toolErrorResult(errorToToolError(e, hooks.ctx.log), alias);
+    const error = errorToToolError(e, hooks.ctx.log);
+    if (phase !== 'execute') await notifyDenied(hooks, phase, error, target);
+    return toolErrorResult(error, alias);
   }
 }

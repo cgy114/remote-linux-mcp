@@ -1,0 +1,149 @@
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { RunResult } from '../../../src/types.js';
+import {
+  buildRemoteTarCreateCommand,
+  buildRemoteTarExtractCommand,
+  createLocalArchive,
+  extractLocalArchive,
+  tarFailure,
+} from '../../../src/transfer/tar.js';
+
+function run(overrides: Partial<RunResult> = {}): RunResult {
+  return {
+    argv: [],
+    displayCommand: 'tar',
+    exitCode: 0,
+    signal: null,
+    stdout: '',
+    stderr: '',
+    stdoutBytes: 0,
+    stderrBytes: 0,
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    timedOut: false,
+    durationMs: 1,
+    ...overrides,
+  };
+}
+
+describe('tar', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'remote-mcp-tar-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  describe('remote commands', () => {
+    it('creates an archive of the path itself', () => {
+      expect(buildRemoteTarCreateCommand('/home/u/dir')).toBe(
+        "tar -C '/home/u' -cf - -- 'dir'",
+      );
+      expect(buildRemoteTarCreateCommand('~/dir')).toBe("tar -C \"$HOME\" -cf - -- 'dir'");
+    });
+
+    it('supports contents and gzip', () => {
+      expect(buildRemoteTarCreateCommand('/home/u/dir', { contents: true })).toBe(
+        "tar -C '/home/u/dir' -cf - .",
+      );
+      expect(buildRemoteTarCreateCommand('/home/u/dir', { gzip: true })).toBe(
+        "tar -C '/home/u' -czf - -- 'dir'",
+      );
+      expect(buildRemoteTarExtractCommand('/home/u')).toBe("tar -C '/home/u' -xf -");
+      expect(buildRemoteTarExtractCommand('~', { gzip: true })).toBe(
+        "tar -C \"$HOME\" -xzf -",
+      );
+    });
+
+    it('refuses to archive a root', () => {
+      expect(() => buildRemoteTarCreateCommand('/')).toThrow(
+        expect.objectContaining({ code: 'remote_path_invalid' }),
+      );
+      expect(() => buildRemoteTarCreateCommand('~')).toThrow(
+        expect.objectContaining({ code: 'remote_path_invalid' }),
+      );
+    });
+  });
+
+  describe('local roundtrip', () => {
+    it('archives and extracts a single file', async () => {
+      const file = path.join(root, 'file.txt');
+      const archive = path.join(root, 'file.tar');
+      const dest = path.join(root, 'dest');
+      await fs.writeFile(file, 'hello tar');
+      await fs.mkdir(dest);
+
+      const created = await createLocalArchive({ source: file, archive });
+      expect(tarFailure(created)).toBeUndefined();
+
+      const extracted = await extractLocalArchive({ archive, destDir: dest });
+      expect(tarFailure(extracted)).toBeUndefined();
+      await expect(fs.readFile(path.join(dest, 'file.txt'), 'utf8')).resolves.toBe('hello tar');
+    });
+
+    it('archives directory contents', async () => {
+      const src = path.join(root, 'src');
+      await fs.mkdir(path.join(src, 'nested'), { recursive: true });
+      await fs.writeFile(path.join(src, 'a.txt'), 'a');
+      await fs.writeFile(path.join(src, 'nested', 'b.txt'), 'b');
+      const archive = path.join(root, 'dir.tar');
+      const dest = path.join(root, 'dest');
+      await fs.mkdir(dest);
+
+      await createLocalArchive({ source: src, archive, contents: true });
+      await extractLocalArchive({ archive, destDir: dest });
+      await expect(fs.readFile(path.join(dest, 'a.txt'), 'utf8')).resolves.toBe('a');
+      await expect(fs.readFile(path.join(dest, 'nested', 'b.txt'), 'utf8')).resolves.toBe('b');
+    });
+
+    it('archives the directory itself when contents is false', async () => {
+      const src = path.join(root, 'src');
+      await fs.mkdir(src);
+      await fs.writeFile(path.join(src, 'a.txt'), 'a');
+      const archive = path.join(root, 'dir.tar');
+      const dest = path.join(root, 'dest');
+      await fs.mkdir(dest);
+
+      await createLocalArchive({ source: src, archive });
+      await extractLocalArchive({ archive, destDir: dest });
+      await expect(fs.readFile(path.join(dest, 'src', 'a.txt'), 'utf8')).resolves.toBe('a');
+    });
+
+    it('roundtrips gzip archives', async () => {
+      const file = path.join(root, 'g.txt');
+      const archive = path.join(root, 'g.tar.gz');
+      const dest = path.join(root, 'dest');
+      await fs.writeFile(file, 'gzip');
+      await fs.mkdir(dest);
+
+      await createLocalArchive({ source: file, archive, gzip: true });
+      await extractLocalArchive({ archive, destDir: dest, gzip: true });
+      await expect(fs.readFile(path.join(dest, 'g.txt'), 'utf8')).resolves.toBe('gzip');
+    });
+  });
+
+  describe('tarFailure', () => {
+    it('returns undefined on success', () => {
+      expect(tarFailure(run())).toBeUndefined();
+    });
+
+    it('maps nonzero exit to tar_failed', () => {
+      const failure = tarFailure(run({ exitCode: 2, stderr: 'tar: fatal error' }));
+      expect(failure).toMatchObject({ kind: 'RemoteExit', code: 'tar_failed' });
+      expect(failure?.details?.['exitCode']).toBe(2);
+    });
+
+    it('maps timeout and spawn errors to their categories', () => {
+      expect(tarFailure(run({ timedOut: true, exitCode: null }))?.kind).toBe('Timeout');
+      expect(
+        tarFailure(run({ exitCode: null, spawnError: { code: 'ENOENT', message: 'missing' } }))?.kind,
+      ).toBe('Internal');
+    });
+  });
+});
