@@ -246,7 +246,7 @@ async function runSteps(o: TrustFlowOptions, d: TrustFlowDeps): Promise<TrustFlo
   const observed: PinnedHostKey = {
     algorithm: entry.algorithm,
     keyBlob: entry.keyBlob,
-    fingerprint: fingerprintKey(entry.algorithm, entry.keyBlob),
+    fingerprint: fingerprintKey(entry.keyBlob),
     firstSeenAt: now,
     lastVerifiedAt: now,
   };
@@ -342,7 +342,7 @@ async function runSteps(o: TrustFlowOptions, d: TrustFlowDeps): Promise<TrustFlo
     }
     if (pinned2?.fingerprint !== decision.pinned?.fingerprint) {
       const error = makeToolError('HostKey', {
-        code: 'lock_busy',
+        code: 'registry_conflict',
         message: '确认期间注册表已被修改',
       });
       return {

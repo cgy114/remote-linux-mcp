@@ -43,7 +43,7 @@ export function mergeHostView(input: MergeHostViewInput): HostView[] {
     const matches = findHostKeyEntries(knownHosts, eff.host, eff.port);
     const observed = matches.flatMap((e) => {
       try {
-        return [fingerprintKey(e.algorithm, e.keyBlob)];
+        return [fingerprintKey(e.keyBlob)];
       } catch {
         return [];
       }

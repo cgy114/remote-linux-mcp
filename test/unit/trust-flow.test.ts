@@ -26,7 +26,7 @@ function pinFrom(seed: string, firstSeenAt = '2025-12-01T00:00:00.000Z'): Pinned
   return {
     algorithm: 'ssh-ed25519',
     keyBlob,
-    fingerprint: fingerprintKey('ssh-ed25519', keyBlob),
+    fingerprint: fingerprintKey(keyBlob),
     firstSeenAt,
     lastVerifiedAt: firstSeenAt,
   };
@@ -108,7 +108,7 @@ function makeDeps(over: Partial<TrustFlowDeps> & { registry?: TrustRegistry; obs
     render: renderTrustPreview,
     ...over,
   };
-  return { deps, calls, registry, observedBlob, observedFp: fingerprintKey('ssh-ed25519', observedBlob) };
+  return { deps, calls, registry, observedBlob, observedFp: fingerprintKey(observedBlob) };
 }
 
 const NOW = () => new Date(T0);
@@ -335,6 +335,36 @@ describe('runTrustFlow', () => {
     expect(calls.writeKnownHosts).toHaveLength(0);
     expect(calls.saveRegistry).toHaveLength(0);
     expect(calls.acquireLock).toBe(0);
+  });
+
+  it('concurrent registry change while locked -> failed with registry_conflict, nothing written', async () => {
+    let loads = 0;
+    const raced = pinFrom('server-A'); // 与观察到的指纹相同，但首次读取时注册表为空
+    const { deps, calls } = makeDeps({
+      loadRegistry: async () => {
+        loads += 1;
+        return loads === 1
+          ? { version: 1, hosts: {} }
+          : { version: 1, hosts: { [ALIAS]: raced } };
+      },
+    });
+    const out = await runTrustFlow({
+      host: hostFixture(),
+      paths: PATHS,
+      rotate: false,
+      interactive: true,
+      log: silentLog,
+      now: NOW,
+      deps,
+    });
+    expect(loads).toBe(2);
+    expect(out.ok).toBe(false);
+    expect(out.action).toBe('failed');
+    expect(out.error).toMatchObject({ kind: 'HostKey', code: 'registry_conflict' });
+    expect(out.message).toContain('确认期间注册表已被其他操作修改');
+    expect(calls.writeKnownHosts).toHaveLength(0);
+    expect(calls.saveRegistry).toHaveLength(0);
+    expect(calls.release).toBe(1);
   });
 
   it('unchanged: same fingerprint pinned -> verify and ok unchanged, no writes', async () => {

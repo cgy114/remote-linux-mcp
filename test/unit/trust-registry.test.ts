@@ -14,7 +14,7 @@ function pin(seed: string): PinnedHostKey {
   return {
     algorithm: 'ssh-ed25519',
     keyBlob,
-    fingerprint: fingerprintKey('ssh-ed25519', keyBlob),
+    fingerprint: fingerprintKey(keyBlob),
     firstSeenAt: '2026-01-01T00:00:00.000Z',
     lastVerifiedAt: '2026-01-02T00:00:00.000Z',
   };

@@ -19,9 +19,13 @@ export class ConfigError extends Error {
 }
 
 export class UsageError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
+  /** 机器可读的错误码（如 invalid_alias、invalid_host）；未提供时不存在。 */
+  declare readonly code?: string;
+
+  constructor(message: string, options?: { cause?: unknown; code?: string }) {
     super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = 'UsageError';
+    if (options?.code !== undefined) this.code = options.code;
   }
 }
 

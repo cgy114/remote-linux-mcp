@@ -45,9 +45,8 @@ export function policyError(e: UsageError | ConfigError): ToolError {
   let code = 'policy_denied';
   if (e instanceof ConfigError) {
     code = `config_${e.code}`;
-  } else {
-    const raw = (e as { code?: unknown }).code;
-    if (typeof raw === 'string' && raw !== '') code = raw;
+  } else if (typeof e.code === 'string' && e.code !== '') {
+    code = e.code;
   }
   // reason 只用于挑选 REASON_HINTS；Policy 类别由 phase=config 决定
   const base = toUserError({ phase: 'config', reason: code });

@@ -3,11 +3,15 @@ import { describe, expect, it } from 'vitest';
 import { resolveSshBinary, resolveToolBinary } from '../../src/ssh/binary.js';
 
 describe('resolveToolBinary', () => {
-  it('resolves ssh, ssh-keygen and taskkill to absolute paths on this machine', async () => {
-    for (const name of ['ssh', 'ssh-keygen', 'taskkill'] as const) {
+  it('resolves ssh and ssh-keygen to absolute paths on this machine', async () => {
+    for (const name of ['ssh', 'ssh-keygen'] as const) {
       const p = await resolveToolBinary(name);
       expect(path.isAbsolute(p)).toBe(true);
     }
+  });
+
+  it.skipIf(process.platform !== 'win32')('resolves taskkill to an absolute path on Windows', async () => {
+    expect(path.isAbsolute(await resolveToolBinary('taskkill'))).toBe(true);
   });
 
   it('returns the same path on repeated calls (cached)', async () => {

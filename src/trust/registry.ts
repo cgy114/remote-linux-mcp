@@ -37,7 +37,7 @@ function validatePinned(file: string, alias: string, value: unknown): PinnedHost
   const pin = value as unknown as PinnedHostKey;
   if (!FINGERPRINT_RE.test(pin.fingerprint)) throw schemaError(file, `${where}.fingerprint has invalid format`);
   if (!isValidKeyBlob(pin.keyBlob)) throw schemaError(file, `${where}.keyBlob is not valid base64`);
-  if (fingerprintKey(pin.algorithm, pin.keyBlob) !== pin.fingerprint) {
+  if (fingerprintKey(pin.keyBlob) !== pin.fingerprint) {
     throw schemaError(file, `${where}.fingerprint does not match keyBlob`);
   }
   return {

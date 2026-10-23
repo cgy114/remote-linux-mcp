@@ -1,5 +1,6 @@
 import fc from 'fast-check';
 import { describe, expect, it, vi } from 'vitest';
+import { UsageError } from '../../src/errors/classes.js';
 import {
   classify,
   classifyExit,
@@ -83,6 +84,26 @@ function combine(...kinds: ErrorKind[]): ErrorFacts {
 function alone(kind: ErrorKind): ErrorFacts {
   return combine(kind);
 }
+
+describe('UsageError', () => {
+  it('exposes an optional machine-readable code', () => {
+    const withCode = new UsageError('bad alias', { code: 'invalid_alias' });
+    expect(withCode.name).toBe('UsageError');
+    expect(withCode.message).toBe('bad alias');
+    expect(withCode.code).toBe('invalid_alias');
+  });
+
+  it('omits the code property entirely when no code is given', () => {
+    const plain = new UsageError('plain');
+    expect(plain.code).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(plain, 'code')).toBe(false);
+  });
+
+  it('keeps the cause option alongside code', () => {
+    const cause = new Error('root');
+    expect(new UsageError('wrapped', { code: 'x', cause }).cause).toBe(cause);
+  });
+});
 
 describe('errorTaxonomy', () => {
   const expected: Record<ErrorKind, { code: string; retryable: boolean; exitCode: number }> = {

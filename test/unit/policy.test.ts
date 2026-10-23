@@ -105,6 +105,7 @@ describe('assertAlias', () => {
       expect.unreachable();
     } catch (e) {
       expect(e).toBeInstanceOf(UsageError);
+      expect((e as UsageError).code).toBe('invalid_alias');
     }
   });
 });
@@ -246,10 +247,14 @@ describe('resolveIdentityFile', () => {
     expect(resolveIdentityFile('keys/id', base)).toBe(path.resolve(base, 'keys', 'id'));
   });
 
-  it('expands ~/ to the current user home directory', () => {
+  it('expands "~", "~/..." and "~\\..." to the current user home directory', () => {
+    const home = os.homedir();
     expect(resolveIdentityFile('~/.ssh/id_ed25519', KH)).toBe(
-      path.resolve(os.homedir(), '.ssh', 'id_ed25519'),
+      path.resolve(home, '.ssh', 'id_ed25519'),
     );
+    expect(resolveIdentityFile('~/x', KH)).toBe(path.resolve(home, 'x'));
+    expect(resolveIdentityFile('~\\x', KH)).toBe(path.resolve(home, 'x'));
+    expect(resolveIdentityFile('~', KH)).toBe(path.resolve(home));
   });
 
   it('rejects ~other and NUL bytes with ConfigError schema', () => {

@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
+import { expandHome } from '../config/paths.js';
 import { ConfigError } from '../errors/classes.js';
 import type {
   Alias,
@@ -14,6 +14,7 @@ import type {
   Target,
   TrustRegistry,
 } from '../types.js';
+import { fingerprintKey } from '../util/fingerprint.js';
 import { assertAlias, usageError } from './alias.js';
 
 const MAX_JUMPS = 3;
@@ -197,13 +198,8 @@ export function resolveIdentityFile(p: string | undefined, baseDir: string): str
   if (p.length === 0) {
     throw new ConfigError('schema', 'identityFile must not be empty');
   }
-  let expanded = p;
-  if (p === '~' || p.startsWith('~/') || p.startsWith('~\\')) {
-    expanded = path.join(os.homedir(), p.slice(1));
-  } else if (p.startsWith('~')) {
-    throw new ConfigError('schema', 'identityFile only supports "~" for the current user, not "~user"');
-  }
-  return path.resolve(baseDir, expanded);
+  // expandHome 只接受 "~"/"~/..."/"~\\..."，其余 "~user" 形式抛 ConfigError('schema')。
+  return path.resolve(baseDir, expandHome(p, os.homedir()));
 }
 
 export function effectiveHost(cfg: RemoteConfig, alias: string): EffectiveHost {
@@ -357,13 +353,4 @@ function hostNames(host: string, port: number): Set<string> {
   const names = new Set<string>([`[${h}]:${port}`]);
   if (port === 22) names.add(h);
   return names;
-}
-
-/** OpenSSH-style SHA256 fingerprint of a base64 public key blob. */
-function fingerprintKey(keyBlob: string): string {
-  const digest = createHash('sha256')
-    .update(Buffer.from(keyBlob, 'base64'))
-    .digest('base64')
-    .replace(/=+$/, '');
-  return `SHA256:${digest}`;
 }

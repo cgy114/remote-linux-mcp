@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ConfigError } from '../../src/errors/classes.js';
 import { resolveToolBinary } from '../../src/ssh/binary.js';
+import { fingerprintKey } from '../../src/util/fingerprint.js';
 import {
   findHostKeyEntries,
   formatKnownHostsEntry,
@@ -244,11 +246,34 @@ describe('queryUserKnownHosts', () => {
     expect(res.entries).toEqual([]);
   });
 
-  it('does not throw for localhost even when the lookup misses or hits', async () => {
+  it('finds the matching localhost entry in an explicit known_hosts file', async () => {
     if (keygen === undefined) return;
-    const res = await queryUserKnownHosts({ host: 'localhost', port: 2222, sshKeygenPath: keygen, env: process.env });
-    expect(typeof res.ok).toBe('boolean');
-    expect(Array.isArray(res.entries)).toBe(true);
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'remote-mcp-qkh-'));
+    try {
+      const file = path.join(dir, 'known_hosts');
+      await fs.writeFile(file, `localhost ssh-ed25519 ${BLOB_A}\n`, 'utf8');
+      const res = await queryUserKnownHosts({
+        host: 'localhost',
+        port: 22,
+        file,
+        sshKeygenPath: keygen,
+        env: process.env,
+      });
+      expect(res.ok).toBe(true);
+      expect(res.entries).toHaveLength(1);
+      expect(res.entries[0]).toMatchObject({
+        marker: null,
+        hosts: ['localhost'],
+        algorithm: 'ssh-ed25519',
+        keyBlob: BLOB_A,
+      });
+      const expected =
+        'SHA256:' +
+        createHash('sha256').update(Buffer.from(BLOB_A, 'base64')).digest('base64').replace(/=+$/, '');
+      expect(fingerprintKey(res.entries[0]!.keyBlob)).toBe(expected);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('returns ok:false (no throw) when the binary path is bogus', async () => {

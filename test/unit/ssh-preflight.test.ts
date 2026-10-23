@@ -7,6 +7,7 @@ import type { Alias, EffectiveHost, Logger } from '../../src/types.js';
 import { buildChildEnv } from '../../src/ssh/env.js';
 import {
   authSignature,
+  hostKeyUnknownSignature,
   inspectAgent,
   parseSshAddOutput,
   preflightAuth,
@@ -153,11 +154,18 @@ describe('preflightJump', () => {
     expect(await preflightJump({ jumps: [], log: silentLog })).toEqual({ ok: true });
   });
 
-  it('does not throw for localhost (result not forced)', async () => {
+  it('reports a concrete result for localhost without throwing', async () => {
     const r = await preflightJump({
       jumps: [{ host: 'localhost' }],
       log: silentLog,
     });
-    expect(typeof r.ok).toBe('boolean');
+    if (r.ok) {
+      expect(r).toEqual({ ok: true });
+    } else {
+      expect(r.fact.phase).toBe('jump');
+      expect(r.fact.reason).toBe('known_hosts_missing');
+      expect(r.fact.signatures).toEqual(hostKeyUnknownSignature());
+      expect(classify(r.fact)).toBe('HostKey');
+    }
   });
 });
