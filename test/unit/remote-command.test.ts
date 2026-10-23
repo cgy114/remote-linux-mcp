@@ -1,5 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
@@ -339,17 +342,41 @@ describe('encodeScript properties', () => {
   });
 });
 
-const bashAvailable = (() => {
+// 探测 bash 是否可用，并记录其 `$OSTYPE`：Windows 上可能解析到 WSL（linux-gnu）
+// 或 Cygwin/MSYS（cygwin、msys），两者能读取的脚本路径形式不同。
+const bashEnvironment = (() => {
   try {
-    const r = spawnSync('bash', ['-c', 'printf ok']);
-    return r.error === undefined && r.status === 0 && r.stdout.toString() === 'ok';
+    const r = spawnSync('bash', ['-c', 'printf "%s|%s" ok "$OSTYPE"'], {
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+    if (r.error !== undefined || r.status !== 0) return undefined;
+    const [ok, ostype = ''] = (r.stdout ?? '').split('|');
+    return ok === 'ok' ? ostype : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 })();
+const bashAvailable = bashEnvironment !== undefined;
 
-// Windows 上 `bash` 可能解析到 WSL，单次 spawn 约 1.5–2s；因此批量：一次 spawn
-// 处理全部样本（每行一个 payload，payload 不含换行/NUL 且不含单引号），输出 hex 逐条比对。
+/** 把临时脚本路径转成该 bash 能读取的形式：WSL 需要 /mnt/<drive>/...；Cygwin/MSYS 接受 C:/...。 */
+function bashScriptPath(winPath: string, ostype: string): string {
+  if (process.platform !== 'win32') return winPath;
+  const slashPath = winPath.replace(/\\/g, '/');
+  if (ostype.startsWith('linux')) {
+    return slashPath.replace(
+      /^([A-Za-z]):\//,
+      (_match, drive: string) => `/mnt/${drive.toLowerCase()}/`,
+    );
+  }
+  return slashPath;
+}
+
+// Windows 上 `bash` 可能解析到 WSL 启动器：`bash -c <script>` 会在进程创建层
+// 丢掉脚本里的 `$p`，导致输出为空。因此改为「临时脚本文件 + stdin 批量输入」，
+// 完全避开命令行引号问题。脚本路径按 bash 类型转换（WSL -> /mnt/c/...），且不设
+// cwd：WSL 会把启动时的 cwd 当作自身工作目录并持有目录句柄，导致临时目录删不掉。
+// 单次 spawn 处理全部样本（每行一个 payload，payload 不含换行/NUL 且不含单引号）。
 describe('encodeScript differential vs bash printf %b', () => {
   it.skipIf(!bashAvailable)(
     'matches bash output for arbitrary text in a single batch spawn',
@@ -357,27 +384,49 @@ describe('encodeScript differential vs bash printf %b', () => {
     () => {
       const samples = fc.sample(wellFormedNoNul, { numRuns: 40 });
       const payloads = samples.map((script) => encodeScript(script));
-      const script = `while IFS= read -r p; do printf %b "$p" | od -An -v -tx1 | tr -d '[:space:]'; printf '\\n'; done`;
 
-      const started = Date.now();
-      const r = spawnSync('bash', ['-c', script], {
-        input: `${payloads.join('\n')}\n`,
-        maxBuffer: 16 * 1024 * 1024,
-      });
-      const elapsedMs = Date.now() - started;
-      console.log(`[bash-diff] ${samples.length} samples in ${elapsedMs}ms (1 bash spawn)`);
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rm-bash-diff-'));
+      try {
+        const script = [
+          'while IFS= read -r p; do',
+          `  printf %b "$p" | od -An -v -tx1 | tr -d '[:space:]'`,
+          `  printf '\\n'`,
+          'done',
+          '',
+        ].join('\n');
+        const localScriptPath = path.join(dir, 'diff.sh');
+        const scriptPath = bashScriptPath(localScriptPath, bashEnvironment ?? '');
+        fs.writeFileSync(localScriptPath, script, 'utf8');
 
-      expect(r.status).toBe(0);
-      const lines = r.stdout.toString('utf8').split('\n');
-      while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-      expect(lines).toHaveLength(samples.length);
-
-      samples.forEach((scriptText, i) => {
-        const actual = Buffer.from(lines[i] as string, 'hex');
-        expect(actual, `sample #${i} ${JSON.stringify(scriptText)}`).toEqual(
-          Buffer.from(scriptText, 'utf8'),
+        const started = Date.now();
+        const r = spawnSync('bash', [scriptPath], {
+          input: `${payloads.join('\n')}\n`,
+          maxBuffer: 16 * 1024 * 1024,
+          timeout: 60_000,
+          encoding: 'utf8',
+        });
+        const elapsedMs = Date.now() - started;
+        console.log(
+          `[bash-diff] ${samples.length} samples in ${elapsedMs}ms (1 bash spawn, script file + stdin)`,
         );
-      });
+
+        expect(r.error).toBeUndefined();
+        expect(r.status, `bash stderr: ${r.stderr}`).toBe(0);
+
+        const lines = r.stdout.split('\n');
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+        expect(lines).toHaveLength(samples.length);
+
+        samples.forEach((scriptText, i) => {
+          // od -tx1 输出小写、tr 已去掉空白；按实际格式归一化后再比对。
+          const actualHex = (lines[i] as string).trim().toLowerCase();
+          const expectedHex = Buffer.from(scriptText, 'utf8').toString('hex').toLowerCase();
+          expect(actualHex, `sample #${i} ${JSON.stringify(scriptText)}`).toBe(expectedHex);
+        });
+      } finally {
+        // 防御杀软扫描等外部句柄：Windows 上偶发 EPERM/EBUSY，按 maxRetries 重试。
+        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      }
     },
   );
 });
