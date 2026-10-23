@@ -43,6 +43,13 @@ export interface ErrorFacts {
   reason?: string;
 }
 
+/** 文件模式下本地 I/O 失败（打开/读取/写入）；仅在 stdinFile/stdoutFile 出错时存在。 */
+export interface RunIoError {
+  stream: 'stdin' | 'stdout';
+  code: string;
+  message: string;
+}
+
 export interface RunResult {
   argv: readonly string[];
   displayCommand: string;
@@ -59,6 +66,8 @@ export interface RunResult {
   timedOut: boolean;
   durationMs: number;
   spawnError?: { code: string; message: string };
+  /** stdinFile/stdoutFile 模式下的本地文件错误；spawn 前打开失败或流式读写出错。 */
+  ioError?: RunIoError;
 }
 
 export interface MCPPaths {
@@ -68,6 +77,20 @@ export interface MCPPaths {
   trustRegistryFile: string;
   trustLockFile: string;
   source: 'flag' | 'env' | 'default';
+}
+
+/** P3 文件传输的全局策略（展开后的默认值）。 */
+export interface FilesConfig {
+  /** 本地可读/可写的根目录（绝对路径）；空数组表示不允许任何本地路径。 */
+  localRoots: string[];
+  /** 远端禁止访问的前缀（以 / 或 ~ 开头）。 */
+  remoteDeny: string[];
+  maxFileBytes: number;
+  maxFiles: number;
+  maxTotalBytes: number;
+  maxDepth: number;
+  transferTimeoutMs: number;
+  verify: 'manifest';
 }
 
 export interface Defaults {
@@ -82,6 +105,7 @@ export interface Defaults {
     allow: string[];
     deny: string[];
   };
+  files: FilesConfig;
 }
 
 export interface Security {
@@ -106,6 +130,8 @@ export interface RemoteConfig {
   defaults: Defaults;
   security: Security;
   hosts: Record<string, HostConfig>;
+  /** 与 defaults.files 指向同一对象。 */
+  files: FilesConfig;
 }
 
 export interface EffectiveHost {

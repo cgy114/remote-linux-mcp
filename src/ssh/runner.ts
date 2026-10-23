@@ -1,6 +1,10 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
+import { promises as fs } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
+import { finished } from 'node:stream/promises';
 import { shSingleQuote } from '../policy/shell.js';
-import type { RunResult } from '../types.js';
+import type { RunIoError, RunResult } from '../types.js';
 import { resolveSshBinary, resolveToolBinary } from './binary.js';
 
 const IS_WIN = process.platform === 'win32';
@@ -165,6 +169,34 @@ export async function captureStream(
   return { text, truncated };
 }
 
+/**
+ * 把流读入内存（用于 SFTP 小文件）。超过 maxBytes 立即停止读取并返回
+ * `{ buffer: null, truncated: true }`；bytes 为已收到的总字节数。
+ */
+export async function captureStdoutAsBuffer(
+  stream: NodeJS.ReadableStream,
+  maxBytes: number,
+): Promise<{ buffer: Buffer | null; bytes: number; truncated: boolean }> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  let truncated = false;
+  try {
+    for await (const chunk of stream) {
+      const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : (chunk as Buffer);
+      bytes += buf.length;
+      if (bytes > maxBytes) {
+        truncated = true;
+        break;
+      }
+      chunks.push(buf);
+    }
+  } catch {
+    // 读错误：返回已读到的部分，由调用方按 bytes/truncated 判断
+  }
+  if (truncated) return { buffer: null, bytes, truncated: true };
+  return { buffer: Buffer.concat(chunks), bytes, truncated: false };
+}
+
 // ---------- 超时与退出 ----------
 
 export interface ExitInfo {
@@ -276,6 +308,92 @@ function quoteArg(s: string): string {
   return shSingleQuote(s);
 }
 
+interface IoFacts {
+  code: string;
+  message: string;
+}
+
+function ioFacts(err: unknown): IoFacts {
+  const code =
+    typeof err === 'object' && err !== null && 'code' in err
+      ? String((err as { code?: unknown }).code ?? 'IO_ERROR')
+      : 'IO_ERROR';
+  const message = err instanceof Error ? err.message : String(err);
+  return { code, message };
+}
+
+interface FilePumpResult {
+  bytes: number;
+  truncated: boolean;
+  error?: IoFacts;
+}
+
+interface StreamCapture {
+  text: string;
+  truncated: boolean;
+  bytes: number;
+  error?: IoFacts;
+}
+
+async function writeChunk(
+  out: NodeJS.WritableStream,
+  buf: Buffer,
+): Promise<IoFacts | undefined> {
+  try {
+    if (!out.write(buf)) await once(out, 'drain');
+    return undefined;
+  } catch (err) {
+    return ioFacts(err);
+  }
+}
+
+/**
+ * 把子进程 stdout 流式写盘（遵守背压）。超过 maxBytes 时只写满上限、
+ * 调用 onAbort 杀进程树并提前结束；返回已收到的总字节数。
+ */
+async function pumpToFile(
+  stream: NodeJS.ReadableStream,
+  out: NodeJS.WritableStream,
+  maxBytes: number,
+  onAbort: () => void,
+): Promise<FilePumpResult> {
+  let bytes = 0;
+  let truncated = false;
+  let error: IoFacts | undefined;
+  try {
+    for await (const chunk of stream) {
+      const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : (chunk as Buffer);
+      bytes += buf.length;
+      if (bytes > maxBytes) {
+        truncated = true;
+        const allowed = Math.max(0, maxBytes - (bytes - buf.length));
+        if (allowed > 0) error = await writeChunk(out, buf.subarray(0, allowed));
+        onAbort();
+        break;
+      }
+      error = await writeChunk(out, buf);
+      if (error !== undefined) {
+        onAbort();
+        break;
+      }
+    }
+  } catch {
+    // 子进程流错误：不作为本地 ioError，结果由退出事实表达
+  }
+  out.end();
+  await finished(out).catch(() => undefined);
+  return { bytes, truncated, ...(error !== undefined ? { error } : {}) };
+}
+
+async function closeQuietly(handle: FileHandle | undefined): Promise<void> {
+  if (handle === undefined) return;
+  try {
+    await handle.close();
+  } catch {
+    // 关闭失败不影响合成结果
+  }
+}
+
 export async function spawnCapture(input: {
   file: string;
   argv: readonly string[];
@@ -286,10 +404,58 @@ export async function spawnCapture(input: {
   stdin?: 'ignore' | 'pipe';
   /** 有值时以 pipe 打开 stdin，写入后关闭；写入错误（如 EPIPE）被吞掉。 */
   stdinData?: string | Buffer;
+  /** 从本地文件流式喂 stdin；与 stdinData 互斥。 */
+  stdinFile?: string;
+  /** 把 stdout 流式写到本地文件（stdout 不再进内存）；超过上限即杀进程树。 */
+  stdoutFile?: string;
 }): Promise<RunResult> {
+  if (input.stdinData !== undefined && input.stdinFile !== undefined) {
+    throw new TypeError('stdinData and stdinFile are mutually exclusive');
+  }
+
   const started = Date.now();
   const fullArgv = [input.file, ...input.argv];
   const displayCommand = fullArgv.map(quoteArg).join(' ');
+
+  // 本地文件必须在 spawn 之前打开；打开失败则合成结果、不 spawn。
+  let stdinHandle: FileHandle | undefined;
+  let stdoutHandle: FileHandle | undefined;
+  try {
+    if (input.stdinFile !== undefined) stdinHandle = await fs.open(input.stdinFile, 'r');
+    if (input.stdoutFile !== undefined) stdoutHandle = await fs.open(input.stdoutFile, 'w');
+  } catch (err) {
+    const stream: 'stdin' | 'stdout' =
+      input.stdinFile !== undefined && stdinHandle === undefined ? 'stdin' : 'stdout';
+    const facts = ioFacts(err);
+    await closeQuietly(stdinHandle);
+    await closeQuietly(stdoutHandle);
+    return {
+      argv: fullArgv,
+      displayCommand,
+      exitCode: null,
+      signal: null,
+      stdout: '',
+      stderr: '',
+      stdoutBytes: 0,
+      stderrBytes: 0,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      timedOut: false,
+      durationMs: Date.now() - started,
+      ioError: { stream, ...facts },
+    };
+  }
+
+  const stdinStream = stdinHandle?.createReadStream({ autoClose: true });
+  const fileOut = stdoutHandle?.createWriteStream({ autoClose: true });
+  let stdinIo: IoFacts | undefined;
+  if (stdinStream !== undefined) {
+    stdinStream.on('error', (err: unknown) => {
+      stdinIo ??= ioFacts(err);
+    });
+  }
+  // 写错误由 pumpToFile 的 finished/write 捕获；这里只防止未处理的 'error' 事件。
+  fileOut?.on('error', () => undefined);
 
   let taskkillPath = 'taskkill';
   if (IS_WIN) {
@@ -300,7 +466,10 @@ export async function spawnCapture(input: {
     }
   }
 
-  const stdinMode = input.stdinData !== undefined ? 'pipe' : (input.stdin ?? 'ignore');
+  const stdinMode =
+    input.stdinData !== undefined || input.stdinFile !== undefined
+      ? 'pipe'
+      : (input.stdin ?? 'ignore');
   const child = spawn(input.file, [...input.argv], {
     shell: false,
     windowsHide: true,
@@ -315,11 +484,27 @@ export async function spawnCapture(input: {
     spawnError = { code: err.code ?? 'SPAWN_ERROR', message: err.message };
   });
 
-  const emptyCapture = { text: '', truncated: false, bytes: 0 };
-  const outP = child.stdout
-    ? captureStreamCounted(child.stdout, input.maxOutputBytes)
-    : Promise.resolve(emptyCapture);
-  const errP = child.stderr
+  // 超过输出上限或写盘失败时只杀一次进程树。
+  let aborted = false;
+  const abort = (): void => {
+    if (aborted) return;
+    aborted = true;
+    if (child.pid !== undefined) void killTree(child.pid, taskkillPath);
+  };
+
+  const emptyCapture: StreamCapture = { text: '', truncated: false, bytes: 0 };
+  const outP: Promise<StreamCapture> =
+    child.stdout === null
+      ? Promise.resolve(emptyCapture)
+      : fileOut !== undefined
+        ? pumpToFile(child.stdout, fileOut, input.maxOutputBytes, abort).then((r) => ({
+            text: '',
+            truncated: r.truncated,
+            bytes: r.bytes,
+            ...(r.error !== undefined ? { error: r.error } : {}),
+          }))
+        : captureStreamCounted(child.stdout, input.maxOutputBytes);
+  const errP: Promise<StreamCapture> = child.stderr
     ? captureStreamCounted(child.stderr, input.maxOutputBytes)
     : Promise.resolve(emptyCapture);
 
@@ -327,12 +512,18 @@ export async function spawnCapture(input: {
     // 子进程提前退出时写入会触发 EPIPE；吞掉，结果由 exitCode/spawnError 表达。
     child.stdin?.on('error', () => undefined);
     child.stdin?.end(input.stdinData);
+  } else if (stdinStream !== undefined) {
+    // EPIPE（子进程提前退出）吞掉；本地读错误记录到 ioError。
+    if (child.stdin !== null) {
+      child.stdin.on('error', () => undefined);
+      stdinStream.pipe(child.stdin);
+    }
   }
 
-  const exit = await waitForExit(child, input.timeoutMs, () =>
-    child.pid !== undefined ? killTree(child.pid, taskkillPath) : undefined,
-  );
+  const exit = await waitForExit(child, input.timeoutMs, abort);
   untrack();
+  // 子进程已结束：若 stdin 文件尚未读完，释放句柄。
+  stdinStream?.destroy();
 
   // 超时/被杀后，流可能被孙进程占用：最多再等 2s
   const settle = Promise.all([outP, errP]);
@@ -340,6 +531,7 @@ export async function spawnCapture(input: {
     ? await Promise.race([settle, new Promise<null>((r) => setTimeout(() => r(null), EXIT_GRACE_MS))])
     : await settle;
   const [out, err] = streams ?? [emptyCapture, emptyCapture];
+  const stdoutError = out.error;
 
   const result: RunResult = {
     argv: fullArgv,
@@ -356,6 +548,11 @@ export async function spawnCapture(input: {
     durationMs: Date.now() - started,
   };
   if (spawnError !== undefined) result.spawnError = spawnError;
+  if (stdoutError !== undefined) {
+    result.ioError = { stream: 'stdout', code: stdoutError.code, message: stdoutError.message };
+  } else if (stdinIo !== undefined) {
+    result.ioError = { stream: 'stdin', code: stdinIo.code, message: stdinIo.message };
+  }
   return result;
 }
 
@@ -367,6 +564,8 @@ export async function runSsh(input: {
   env: NodeJS.ProcessEnv;
   cwd?: string;
   stdinData?: string | Buffer;
+  stdinFile?: string;
+  stdoutFile?: string;
   label: string;
 }): Promise<RunResult> {
   const { path: sshPath } = await resolveSshBinary();
@@ -378,5 +577,33 @@ export async function runSsh(input: {
     maxOutputBytes: input.maxOutputBytes,
     cwd: input.cwd,
     ...(input.stdinData !== undefined ? { stdinData: input.stdinData } : {}),
+    ...(input.stdinFile !== undefined ? { stdinFile: input.stdinFile } : {}),
+    ...(input.stdoutFile !== undefined ? { stdoutFile: input.stdoutFile } : {}),
+  });
+}
+
+/** 运行 sftp；语义与 runSsh 一致（不因退出码抛错，文件 I/O 错误放在 ioError）。 */
+export async function runSftp(input: {
+  argv: readonly string[];
+  timeoutMs: number;
+  maxOutputBytes: number;
+  env: NodeJS.ProcessEnv;
+  cwd?: string;
+  stdinData?: string | Buffer;
+  stdinFile?: string;
+  stdoutFile?: string;
+  label: string;
+}): Promise<RunResult> {
+  const sftpPath = await resolveToolBinary('sftp');
+  return spawnCapture({
+    file: sftpPath,
+    argv: input.argv,
+    env: input.env,
+    timeoutMs: input.timeoutMs,
+    maxOutputBytes: input.maxOutputBytes,
+    cwd: input.cwd,
+    ...(input.stdinData !== undefined ? { stdinData: input.stdinData } : {}),
+    ...(input.stdinFile !== undefined ? { stdinFile: input.stdinFile } : {}),
+    ...(input.stdoutFile !== undefined ? { stdoutFile: input.stdoutFile } : {}),
   });
 }

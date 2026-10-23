@@ -111,6 +111,16 @@ hosts:
       timeouts: { connectMs: 5000, commandMs: 30000, checkMs: 8000 },
       maxOutputBytes: 65536,
       sudo: { mode: 'passwordless', allow: ['systemctl status *'], deny: [] },
+      files: {
+        localRoots: [],
+        remoteDeny: [],
+        maxFileBytes: 536870912,
+        maxFiles: 10000,
+        maxTotalBytes: 4294967296,
+        maxDepth: 64,
+        transferTimeoutMs: 300000,
+        verify: 'manifest',
+      },
     });
   });
 

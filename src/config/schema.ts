@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ConfigError } from '../errors/classes.js';
 import { assertRemoteCwd } from '../policy/remote-command.js';
-import type { Defaults } from '../types.js';
+import type { Defaults, FilesConfig } from '../types.js';
 
 /** host alias：小写字母数字开头，后续允许 . _ -，最长 64。 */
 const ALIAS_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -64,6 +64,51 @@ const securitySchema = z.strictObject({
   known_hosts_file: z.string().min(1).optional(),
 });
 
+/** P3 文件策略的默认门限。 */
+const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024; // 512 MiB
+const DEFAULT_MAX_FILES = 10_000;
+const DEFAULT_MAX_TOTAL_BYTES = 4 * 1024 * 1024 * 1024; // 4 GiB
+const DEFAULT_MAX_DEPTH = 64;
+const DEFAULT_TRANSFER_TIMEOUT_MS = 300_000;
+
+/** remote_deny 条目：以 / 或 ~ 开头、无 NUL、不含 ".." 段。 */
+const remoteDenySchema = z.string().min(1).superRefine((value, ctx) => {
+  if (value[0] !== '/' && value[0] !== '~') {
+    ctx.addIssue({ code: 'custom', message: 'remote_deny entries must start with "/" or "~"' });
+    return;
+  }
+  if (value.includes('\u0000')) {
+    ctx.addIssue({ code: 'custom', message: 'remote_deny entries must not contain NUL' });
+  }
+  if (value.split('/').some((segment) => segment === '..')) {
+    ctx.addIssue({ code: 'custom', message: 'remote_deny entries must not contain ".." segments' });
+  }
+});
+
+/** files 段：严格对象；max_file_bytes 不得超过 max_total_bytes（按展开后的默认值比较）。 */
+export const filesSchema = z
+  .strictObject({
+    local_roots: z.array(z.string().min(1)).optional(),
+    remote_deny: z.array(remoteDenySchema).optional(),
+    max_file_bytes: positiveIntSchema.optional(),
+    max_files: positiveIntSchema.optional(),
+    max_total_bytes: positiveIntSchema.optional(),
+    max_depth: z.number().int().min(0).optional(),
+    transfer_timeout_ms: positiveIntSchema.optional(),
+    verify: z.literal('manifest').optional(),
+  })
+  .superRefine((files, ctx) => {
+    const maxFile = files.max_file_bytes ?? DEFAULT_MAX_FILE_BYTES;
+    const maxTotal = files.max_total_bytes ?? DEFAULT_MAX_TOTAL_BYTES;
+    if (maxFile > maxTotal) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['max_file_bytes'],
+        message: 'max_file_bytes must not exceed max_total_bytes',
+      });
+    }
+  });
+
 const hostSchema = z.strictObject({
   host: z
     .string()
@@ -87,6 +132,7 @@ export const configSchema = z.strictObject({
   version: z.literal(1),
   defaults: defaultsSchema.optional(),
   security: securitySchema.optional(),
+  files: filesSchema.optional(),
   hosts: z
     .record(aliasSchema, hostSchema)
     .refine((h) => Object.keys(h).length > 0, { message: 'at least one host is required' }),
@@ -94,8 +140,36 @@ export const configSchema = z.strictObject({
 
 export type RawConfig = z.infer<typeof configSchema>;
 
-/** 展开 defaults 段的全部默认值（port 22 / default_cwd "~" / 超时 5000,15000,8000 / 输出 1MiB / sudo off）。 */
-export function defaultsFor(raw: RawConfig): Defaults {
+export interface DefaultsForOptions {
+  /** 把 local_roots 条目解析为绝对路径（loadConfig 用于 "~" 展开与 baseDir 解析）。 */
+  resolveLocalRoot?: (p: string) => string;
+}
+
+/**
+ * 展开 files 段的默认值：512 MiB 单文件 / 10000 个文件 / 4 GiB 总量 /
+ * 深度 64 / 传输超时 300s / manifest 校验。local_roots 可注入路径解析器。
+ */
+export function filesFor(
+  raw: RawConfig,
+  resolveLocalRoot?: (p: string) => string,
+): FilesConfig {
+  const f = raw.files;
+  return {
+    localRoots: (f?.local_roots ?? []).map((p) =>
+      resolveLocalRoot !== undefined ? resolveLocalRoot(p) : p,
+    ),
+    remoteDeny: [...(f?.remote_deny ?? [])],
+    maxFileBytes: f?.max_file_bytes ?? DEFAULT_MAX_FILE_BYTES,
+    maxFiles: f?.max_files ?? DEFAULT_MAX_FILES,
+    maxTotalBytes: f?.max_total_bytes ?? DEFAULT_MAX_TOTAL_BYTES,
+    maxDepth: f?.max_depth ?? DEFAULT_MAX_DEPTH,
+    transferTimeoutMs: f?.transfer_timeout_ms ?? DEFAULT_TRANSFER_TIMEOUT_MS,
+    verify: f?.verify ?? 'manifest',
+  };
+}
+
+/** 展开 defaults 段的全部默认值（port 22 / default_cwd "~" / 超时 5000,15000,8000 / 输出 1MiB / sudo off / files 默认）。 */
+export function defaultsFor(raw: RawConfig, opts?: DefaultsForOptions): Defaults {
   const d = raw.defaults;
   const t = d?.timeouts;
   const s = d?.sudo;
@@ -121,6 +195,7 @@ export function defaultsFor(raw: RawConfig): Defaults {
     },
     maxOutputBytes: d?.max_output_bytes ?? 1048576,
     sudo,
+    files: filesFor(raw, opts?.resolveLocalRoot),
   };
   if (defaultHost !== undefined) defaults.defaultHost = defaultHost;
   return defaults;

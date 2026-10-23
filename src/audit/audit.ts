@@ -86,7 +86,12 @@ export function maskArgv(
   return masked;
 }
 
-function deriveOutcome(input: BuildExecAuditInput): {
+/**
+ * 从运行事实推导审计 outcome。优先级固定：
+ * spawn_error > timeout > killed > ok > transport_failure > spawn_error(无退出码)
+ * > exit_nonzero。未运行（run 缺失）视为 spawn_error。
+ */
+export function deriveRunOutcome(input: BuildExecAuditInput): {
   outcome: ExecAuditOutcome;
   exitCode: number | null;
   signal: string | null;
@@ -111,7 +116,7 @@ function deriveOutcome(input: BuildExecAuditInput): {
 
 /** 生成 ssh_exec 审计记录；不包含命令文本、输出或 env 值。 */
 export function buildExecAuditRecord(input: BuildExecAuditInput): ExecAuditRecord {
-  const derived = deriveOutcome(input);
+  const derived = deriveRunOutcome(input);
   const record: ExecAuditRecord = {
     ts: input.timestamp ?? new Date().toISOString(),
     tool: 'ssh_exec',

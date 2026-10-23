@@ -28,13 +28,18 @@ export async function loadConfig(paths: MCPPaths): Promise<RemoteConfig> {
   const baseDir = paths.configDir;
   const home = os.homedir();
 
+  const resolveLocalRoot = (p: string): string => resolveAgainst(p, baseDir, home);
+  const defaults = defaultsFor(raw, { resolveLocalRoot });
+
   return {
     version: raw.version,
     sourcePath: file,
     baseDir,
-    defaults: defaultsFor(raw),
+    defaults,
     security: buildSecurity(raw, baseDir, home),
     hosts: buildHosts(raw, baseDir, home),
+    // 同一对象：修改 defaults.files 与 files 互相可见（P3 只在加载期写入）。
+    files: defaults.files,
   };
 }
 

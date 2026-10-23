@@ -1,10 +1,10 @@
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { appendAudit, auditFilePath, buildExecAuditRecord } from '../audit/audit.js';
-import { UsageError } from '../errors/classes.js';
 import { classifyExit, stderrSignatures, toUserError } from '../errors/classify.js';
-import { assertAlias } from '../policy/alias.js';
-import { buildSshArgv } from '../policy/argv.js';
+import { runSshOperation } from '../pipeline/operation.js';
+import { runSshCommand } from '../pipeline/run-command.js';
+import type { ResolvedTarget } from '../pipeline/target.js';
 import {
   buildExecCommand,
   DEFAULT_EXEC_LIMITS,
@@ -14,12 +14,7 @@ import {
   type ExecCommandPlan,
   type ExecSizeLimits,
 } from '../policy/remote-command.js';
-import { assertTarget, effectiveHost, selectJumpSpec } from '../policy/target.js';
-import { buildChildEnv } from '../ssh/env.js';
-import { getDefaultHostLimiter } from '../ssh/host-limiter.js';
-import { runSsh } from '../ssh/runner.js';
-import { evaluateTrust } from '../trust/gate.js';
-import type { EffectiveHost, Logger, RemoteConfig, RunResult, ToolError } from '../types.js';
+import type { EffectiveHost, Logger, RunResult, ToolError } from '../types.js';
 import { errorToToolError, textResult, toolErrorResult, type ToolContext } from './common.js';
 
 /** ssh_exec 的输入边界；所有字段在 MCP 层先由 zod 校验。 */
@@ -49,31 +44,10 @@ export const EXEC_LIMITS: ExecLimits = {
   ...DEFAULT_EXEC_LIMITS,
 };
 
-export interface ExecTarget {
-  config: RemoteConfig;
-  host: EffectiveHost;
-  destination: string;
-}
+export type ExecTarget = ResolvedTarget;
 
-/**
- * 解析目标主机：host > defaults.default_host。缺失时抛 missing_host，
- * 其余用 policy 层校验（alias、jump 链、目标三元组）。
- */
-export async function resolveExecTarget(
-  input: Pick<SshExecInput, 'host'>,
-  ctx: ToolContext,
-): Promise<ExecTarget> {
-  const config = await ctx.getConfig();
-  const alias = input.host ?? config.defaults.defaultHost;
-  if (alias === undefined || alias === '') {
-    throw new UsageError('missing_host', { code: 'missing_host' });
-  }
-  const checked = assertAlias(alias);
-  const host = effectiveHost(config, checked);
-  const jumps = selectJumpSpec(host.proxyJump);
-  assertTarget({ user: host.user, host: host.host, port: host.port, jumps });
-  return { config, host, destination: `${host.user}@${host.host}:${host.port}` };
-}
+/** 兼容旧导出：ssh_exec 的目标解析（实际实现见 pipeline/target）。 */
+export { resolveExecTarget } from '../pipeline/target.js';
 
 /**
  * 前置输入校验。命令/环境/stdin/cwd 的规则集中在 policy/remote-command。
@@ -88,101 +62,87 @@ export function validateExecInput(input: SshExecInput): void {
   });
 }
 
+/** prepare 阶段的产物：命令计划与本次调用的两个门限。 */
+interface ExecPlan {
+  plan: ExecCommandPlan;
+  timeoutMs: number;
+  maxOutputBytes: number;
+}
+
 /**
- * ssh_exec：严格按 校验 -> 解析目标 -> 信任门禁 -> 构建 -> 限流 -> 执行 -> 审计 -> 格式化。
- * 任何异常都在本层转成 isError 结果，绝不向传输层抛出。
+ * ssh_exec：校验 -> 复用管线（解析目标 -> 信任门禁 -> 构建 -> 限流 -> 执行 ->
+ * 审计 -> 格式化）。任何异常都转成 isError 结果，绝不向传输层抛出。
  */
 export async function sshExec(input: SshExecInput, ctx: ToolContext): Promise<CallToolResult> {
-  let alias: string | undefined;
   try {
     validateExecInput(input);
+  } catch (e) {
+    return toolErrorResult(errorToToolError(e, ctx.log));
+  }
 
-    const { host, destination } = await resolveExecTarget(input, ctx);
-    alias = host.alias;
-
-    // 信任门禁必须在任何 spawn 之前；失败即返回 HostKey 类错误。
-    const trust = await evaluateTrust({ alias: host.alias, host, paths: ctx.paths, log: ctx.log });
-    if (!trust.ok) {
-      const fact = trust.fact;
-      const err = toUserError(
-        {
-          phase: 'trust',
-          ...(fact.reason !== undefined ? { reason: fact.reason } : {}),
-          ...(fact.stderr !== undefined ? { stderr: fact.stderr } : {}),
+  return runSshOperation<ExecPlan, RunResult>({
+    input,
+    ctx,
+    prepare: (target) => {
+      const plan = buildExecCommand({
+        command: input.command,
+        cwd: input.cwd ?? target.host.cwd,
+        env: input.env ?? {},
+        ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),
+        limits: {
+          maxRemoteUtf16: EXEC_LIMITS.maxRemoteUtf16,
+          maxRemoteUtf8: EXEC_LIMITS.maxRemoteUtf8,
         },
-        ctx.log,
-      );
-      return toolErrorResult(err, alias);
-    }
-
-    const cwd = input.cwd ?? host.cwd;
-    const plan = buildExecCommand({
-      command: input.command,
-      cwd,
-      env: input.env ?? {},
-      ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),
-      limits: {
-        maxRemoteUtf16: EXEC_LIMITS.maxRemoteUtf16,
-        maxRemoteUtf8: EXEC_LIMITS.maxRemoteUtf8,
-      },
-    });
-
-    const timeoutMs = input.timeout_ms ?? host.timeouts.commandMs;
-    const maxOutputBytes = input.max_output_bytes ?? host.maxOutputBytes;
-
-    const permit = await getDefaultHostLimiter().acquire(destination);
-    try {
-      const { argv } = buildSshArgv({
-        host,
+      });
+      return {
+        plan,
+        timeoutMs: input.timeout_ms ?? target.host.timeouts.commandMs,
+        maxOutputBytes: input.max_output_bytes ?? target.host.maxOutputBytes,
+      };
+    },
+    execute: ({ target, plan }) =>
+      runSshCommand({
+        host: target.host,
         knownHostsFile: ctx.paths.knownHostsFile,
-        remoteCommand: plan.remoteCommand,
+        remoteCommand: plan.plan.remoteCommand,
+        timeoutMs: plan.timeoutMs,
+        maxOutputBytes: plan.maxOutputBytes,
         mode: 'strict',
-      });
-      const run = await runSsh({
-        argv,
-        timeoutMs,
-        maxOutputBytes,
-        env: buildChildEnv(),
         ...(input.stdin !== undefined ? { stdinData: input.stdin } : {}),
-        label: `ssh_exec:${alias}`,
-      });
-
-      const failure = execFailure(run, ctx.log);
-
-      // 审计只记录退出事实与命令摘要；appendAudit 永不 reject，失败不影响结果。
+        label: `ssh_exec:${target.host.alias}`,
+      }),
+    classifyFailure: (run) => execFailure(run, ctx.log),
+    // 审计只记录退出事实与命令摘要；appendAudit 永不 reject，失败不影响结果。
+    audit: async ({ target, plan, produced: run, lease, failure }) => {
       await appendAudit(
         buildExecAuditRecord({
-          alias: host.alias,
-          destination,
-          commandSha256: plan.commandSha256,
-          commandBytes: plan.commandBytes,
-          cwd: plan.cwd,
-          envKeys: plan.envKeys,
-          stdinBytes: plan.stdinBytes,
+          alias: target.host.alias,
+          destination: target.destination,
+          commandSha256: plan.plan.commandSha256,
+          commandBytes: plan.plan.commandBytes,
+          cwd: plan.plan.cwd,
+          envKeys: plan.plan.envKeys,
+          stdinBytes: plan.plan.stdinBytes,
           run,
-          queueMs: permit.queueMs,
+          queueMs: lease.queueMs,
           ...(failure !== undefined
             ? { failure: { code: failure.code, kind: failure.kind, message: failure.message } }
             : {}),
         }),
         { file: auditFilePath(ctx.paths.configDir), log: ctx.log },
       );
-
-      return formatExecResult({
-        alias: host.alias,
-        host,
-        destination,
-        plan,
+    },
+    format: ({ target, plan, produced: run, lease, failure }) =>
+      formatExecResult({
+        alias: target.host.alias,
+        host: target.host,
+        destination: target.destination,
+        plan: plan.plan,
         run,
-        queueMs: permit.queueMs,
+        queueMs: lease.queueMs,
         ...(failure !== undefined ? { failure } : {}),
-      });
-    } finally {
-      permit.release();
-    }
-  } catch (e) {
-    return toolErrorResult(errorToToolError(e, ctx.log), alias);
-  }
+      }),
+  });
 }
 
 /**

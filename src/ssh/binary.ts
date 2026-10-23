@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-export type ToolName = 'ssh' | 'ssh-keygen' | 'ssh-add' | 'taskkill';
+export type ToolName = 'ssh' | 'sftp' | 'tar' | 'ssh-keygen' | 'ssh-add' | 'taskkill';
 
 const IS_WIN = process.platform === 'win32';
 const cache = new Map<ToolName, string>();
@@ -20,6 +20,7 @@ function systemRoot(): string {
 function systemCandidate(name: ToolName): string | undefined {
   const root = systemRoot();
   if (name === 'taskkill') return path.join(root, 'System32', 'taskkill.exe');
+  if (name === 'tar') return path.join(root, 'System32', 'tar.exe');
   return path.join(root, 'System32', 'OpenSSH', `${name}.exe`);
 }
 

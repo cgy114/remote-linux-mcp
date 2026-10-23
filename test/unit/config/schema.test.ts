@@ -209,6 +209,16 @@ describe('defaultsFor', () => {
       timeouts: { connectMs: 5000, commandMs: 15000, checkMs: 8000 },
       maxOutputBytes: 1048576,
       sudo: { mode: 'off', allow: [], deny: [] },
+      files: {
+        localRoots: [],
+        remoteDeny: [],
+        maxFileBytes: 536870912,
+        maxFiles: 10000,
+        maxTotalBytes: 4294967296,
+        maxDepth: 64,
+        transferTimeoutMs: 300000,
+        verify: 'manifest',
+      },
     });
   });
 
@@ -253,6 +263,16 @@ describe('defaultsFor', () => {
       timeouts: { connectMs: 1000, commandMs: 15000, checkMs: 8000 },
       maxOutputBytes: 8192,
       sudo: { mode: 'password', credential: 'sudo-pw', allow: ['systemctl *'], deny: ['rm *'] },
+      files: {
+        localRoots: [],
+        remoteDeny: [],
+        maxFileBytes: 536870912,
+        maxFiles: 10000,
+        maxTotalBytes: 4294967296,
+        maxDepth: 64,
+        transferTimeoutMs: 300000,
+        verify: 'manifest',
+      },
     });
   });
 });
