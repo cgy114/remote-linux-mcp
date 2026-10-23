@@ -15,4 +15,6 @@
 
 ## Log
 
-- 2026-10-23: P1 round 2 reviews in progress; no decisions yet.
+- 2026-10-23: P1 final verification passed (491 unit tests, protocol suite, real-host E2E). fable verdict CONDITIONAL PASS with one blocker: MCP server not registered. Registered `remote-mcp` at user scope with `node C:\Users\OS\Desktop\remote-mcp\dist\cli.js`; `claude mcp list` reports Connected. P1 now PASS.
+- P1 gate 3: auto-approved per user authorization.
+- P2 disposition: stage level L2 (per stage 0). Two proposals (minimal-change / clean-architecture); default pick = the one maximizing reuse of existing `buildSshArgv`/`runSsh`/trust gate/error taxonomy and minimizing new surface.
