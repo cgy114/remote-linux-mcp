@@ -9,13 +9,15 @@ import { installSignalHandlers, shutdown } from './lifecycle.js';
 import { registerTool, type ToolContext } from './tools/common.js';
 import { hostCheck, hostCheckInput } from './tools/host-check.js';
 import { hostList, hostListInput } from './tools/host-list.js';
+import { sshExec, sshExecInput } from './tools/ssh-exec.js';
 import type { Logger, MCPPaths } from './types.js';
 import { VERSION } from './version.js';
 
 export type { ToolContext } from './tools/common.js';
 
 const INSTRUCTIONS =
-  '先用 host_list 查看已配置的主机及其信任状态，再用 host_check 检查目标主机；不要假设主机已受信任。';
+  '先用 host_list 查看已配置的主机及其信任状态，再用 host_check 检查目标主机；' +
+  'ssh_exec 仅对已信任的主机执行命令，调用前确认命令的影响面（会修改远端状态、不可幂等）。';
 
 /** 创建一个未注册工具的 McpServer 实例。 */
 export function createMcpServer(_ctx: ToolContext): McpServer {
@@ -48,6 +50,21 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         '对已信任的远程主机执行只读检查（uname、sshd 版本）。若主机未受信任，将返回 HostKey 错误并给出 `remote-mcp trust <alias>` 指引。',
       inputSchema: hostCheckInput,
       handler: (input, c) => hostCheck(input, c),
+    },
+    ctx,
+  );
+  registerTool(
+    server,
+    {
+      name: 'ssh_exec',
+      title: '执行远程命令',
+      description:
+        '在已信任的远程主机上通过 bash -lc 执行一条命令，返回 stdout、stderr 与远端退出码。' +
+        '退出码 0–254 是远端命令本身的结果；255 表示 ssh 传输层失败（连接、认证或主机密钥问题）。' +
+        '不支持 sudo 交互、持久会话或文件传输。命令会修改远端状态，执行前请确认影响面。',
+      inputSchema: sshExecInput,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+      handler: (input, c) => sshExec(input, c),
     },
     ctx,
   );

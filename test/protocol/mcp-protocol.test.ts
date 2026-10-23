@@ -38,7 +38,7 @@ interface ToolCallResult {
 }
 
 interface ToolsListResult {
-  tools?: Array<{ name?: string }>;
+  tools?: Array<{ name?: string; annotations?: { readOnlyHint?: boolean } }>;
 }
 
 interface ExitInfo {
@@ -332,9 +332,13 @@ async function assertToolsListed(harness: ServerHarness, id: number): Promise<vo
   const response = await harness.send('tools/list', {}, id);
   expect(response.error, `tools/list returned JSON-RPC error: ${JSON.stringify(response.error)}`).toBeUndefined();
   const result = response.result as ToolsListResult;
-  const names = (result.tools ?? []).map((tool) => tool.name);
+  const tools = result.tools ?? [];
+  const names = tools.map((tool) => tool.name);
   expect(names).toContain('host_list');
   expect(names).toContain('host_check');
+  expect(names).toContain('ssh_exec');
+  const sshExec = tools.find((tool) => tool.name === 'ssh_exec');
+  expect(sshExec?.annotations?.readOnlyHint).toBe(false);
 }
 
 /** 单次 CLI 运行（不进入 MCP 会话），用于未知命令等场景。 */
