@@ -223,7 +223,6 @@ describe('probeHostKey', () => {
   it('fails with a probe-phase fact when the ssh binary is missing', async () => {
     const r = await probeHostKey({
       host: makeHost(),
-      paths: makePaths(),
       timeoutMs: 2000,
       log: silentLog,
       sshPath: MISSING_SSH,

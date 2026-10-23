@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { ConfigError } from '../errors/classes.js';
+import { serializeError } from '../log.js';
 import type { HostConfig, Logger, MCPPaths, RemoteConfig, Security } from '../types.js';
 import { expandHome, normalizePath } from './paths.js';
 import { configSchema, defaultsFor, type RawConfig } from './schema.js';
@@ -47,7 +48,7 @@ export function loadConfigLazy(paths: MCPPaths, log: Logger): () => Promise<Remo
   return () => {
     if (pending === undefined) {
       pending = loadConfig(paths).catch((err: unknown) => {
-        log.warn({ err, path: paths.configFile }, 'failed to load config');
+        log.warn({ err: serializeError(err), path: paths.configFile }, 'failed to load config');
         throw err;
       });
     }

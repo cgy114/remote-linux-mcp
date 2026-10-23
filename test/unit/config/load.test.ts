@@ -284,6 +284,9 @@ describe('loadConfigLazy', () => {
     expect(second).toBe(first);
     expect(readSpy).toHaveBeenCalledTimes(1);
     expect(log.warn).toHaveBeenCalledTimes(1);
+    const logged = log.warn.mock.calls[0]?.[0] as { err?: { name?: string; message?: string } };
+    expect(logged.err?.name).toBe('ConfigError');
+    expect(logged.err?.message).toContain('config file not found');
   });
 
   it('does not re-read even after the file appears following a failure', async () => {

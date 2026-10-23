@@ -217,12 +217,12 @@ async function runSteps(o: TrustFlowOptions, d: TrustFlowDeps): Promise<TrustFlo
   // 1. 跳板预检
   const jumps = selectJumpSpec(host.proxyJump);
   if (jumps.length > 0) {
-    const jr = await d.preflightJump({ host, jumps, log });
+    const jr = await d.preflightJump({ jumps, log });
     if (!jr.ok) return failWithFact(alias, jr.fact, '跳板机前置检查失败：请先确保各跳主机已在 known_hosts 中。');
   }
 
   // 2. 认证预检（P1：认证不可用即拒绝，即便认证失败本身不影响主机指纹信任）
-  const ar = await d.preflightAuth({ host, paths, log });
+  const ar = await d.preflightAuth({ host, log });
   if (!ar.ok) {
     return failWithFact(
       alias,
@@ -232,7 +232,7 @@ async function runSteps(o: TrustFlowOptions, d: TrustFlowDeps): Promise<TrustFlo
   }
 
   // 3. 探测主机密钥（临时 known_hosts，accept-new）
-  const probe = await d.probeHostKey({ host, paths, timeoutMs: host.timeouts.connectMs, log, sshPath });
+  const probe = await d.probeHostKey({ host, timeoutMs: host.timeouts.connectMs, log, sshPath });
   if (!probe.ok) return failWithFact(alias, probe.fact, '无法探测远端主机密钥。');
   if (probe.entries.length !== 1) {
     return failWithFact(

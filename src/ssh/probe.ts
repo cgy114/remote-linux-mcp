@@ -166,7 +166,6 @@ export function parseKnownHosts(text: string): KnownHostEntry[] {
  */
 export async function probeHostKey(input: {
   host: EffectiveHost;
-  paths: MCPPaths;
   timeoutMs: number;
   log: Logger;
   sshPath?: string;

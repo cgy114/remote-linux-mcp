@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { classify } from '../../src/errors/classify.js';
-import type { Alias, EffectiveHost, Logger, MCPPaths } from '../../src/types.js';
+import type { Alias, EffectiveHost, Logger } from '../../src/types.js';
 import { buildChildEnv } from '../../src/ssh/env.js';
 import {
   authSignature,
@@ -32,17 +32,6 @@ function makeHost(over: Partial<EffectiveHost> = {}): EffectiveHost {
     maxOutputBytes: 65536,
     sudo: { mode: 'off', allow: [], deny: [] },
     ...over,
-  };
-}
-
-function makePaths(): MCPPaths {
-  return {
-    configFile: path.join(os.tmpdir(), 'unused-config.yaml'),
-    configDir: os.tmpdir(),
-    knownHostsFile: path.join(os.tmpdir(), 'unused-known-hosts'),
-    trustRegistryFile: path.join(os.tmpdir(), 'unused-registry.json'),
-    trustLockFile: path.join(os.tmpdir(), 'unused.lock'),
-    source: 'default',
   };
 }
 
@@ -78,7 +67,6 @@ describe('preflightAuth with identityFile', () => {
   it('accepts a readable identity file without consulting the agent', async () => {
     const r = await preflightAuth({
       host: makeHost({ identityFile: readableKey }),
-      paths: makePaths(),
       log: silentLog,
     });
     expect(r).toEqual({ ok: true, keySource: 'identity' });
@@ -88,7 +76,6 @@ describe('preflightAuth with identityFile', () => {
     const missing = path.join(dir, 'does-not-exist');
     const r = await preflightAuth({
       host: makeHost({ identityFile: missing }),
-      paths: makePaths(),
       log: silentLog,
     });
     expect(r.ok).toBe(false);
@@ -101,7 +88,7 @@ describe('preflightAuth with identityFile', () => {
 
 describe('preflightAuth without identityFile (depends on local agent)', () => {
   it('returns a structured result and never throws', async () => {
-    const r = await preflightAuth({ host: makeHost(), paths: makePaths(), log: silentLog });
+    const r = await preflightAuth({ host: makeHost(), log: silentLog });
     if (r.ok) {
       expect(r.keySource).toBe('agent');
     } else {
@@ -151,7 +138,6 @@ describe('inspectAgent', () => {
 describe('preflightJump', () => {
   it('reports an unknown host as not in known_hosts', async () => {
     const r = await preflightJump({
-      host: makeHost(),
       jumps: [{ host: 'definitely-not-a-real-host.invalid' }],
       log: silentLog,
     });
@@ -164,12 +150,11 @@ describe('preflightJump', () => {
   });
 
   it('succeeds with no jumps', async () => {
-    expect(await preflightJump({ host: makeHost(), jumps: [], log: silentLog })).toEqual({ ok: true });
+    expect(await preflightJump({ jumps: [], log: silentLog })).toEqual({ ok: true });
   });
 
   it('does not throw for localhost (result not forced)', async () => {
     const r = await preflightJump({
-      host: makeHost(),
       jumps: [{ host: 'localhost' }],
       log: silentLog,
     });

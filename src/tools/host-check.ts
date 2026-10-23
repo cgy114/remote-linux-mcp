@@ -48,14 +48,14 @@ async function runCheck(alias: string, ctx: ToolContext): Promise<CallToolResult
   }
 
   // 4. 认证前置检查
-  const auth = await preflightAuth({ host, paths: ctx.paths, log: ctx.log });
+  const auth = await preflightAuth({ host, log: ctx.log });
   if (!auth.ok) {
     return toolErrorResult(toUserError(auth.fact, ctx.log), alias);
   }
 
   // 5. 跳板前置检查（仅在有跳板时）
   if (jumps.length > 0) {
-    const jump = await preflightJump({ host, jumps, log: ctx.log });
+    const jump = await preflightJump({ jumps, log: ctx.log });
     if (!jump.ok) {
       return toolErrorResult(toUserError(jump.fact, ctx.log), alias);
     }

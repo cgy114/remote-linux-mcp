@@ -1,7 +1,5 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { RunResult } from '../types.js';
-import { spawnCapture } from './runner.js';
 
 export type ToolName = 'ssh' | 'ssh-keygen' | 'ssh-add' | 'taskkill';
 
@@ -71,32 +69,4 @@ export async function resolveSshBinary(
   const sysDir = path.join(systemRoot(), 'System32', 'OpenSSH').toLowerCase();
   const source = IS_WIN && path.dirname(p).toLowerCase() === sysDir ? 'system' : 'path';
   return { path: p, source };
-}
-
-const VERSION_RE = /OpenSSH(?:_for_Windows)?_(\d+)\.(\d+)/;
-const VERSION_MAX_BYTES = 64 * 1024;
-
-/** 执行 `ssh -V` 并解析版本（ssh 把版本写到 stderr）。 */
-export async function readOpenSshVersion(
-  sshPath: string,
-): Promise<{ raw: string; major: number; minor: number }> {
-  const res: RunResult = await spawnCapture({
-    file: sshPath,
-    argv: ['-V'],
-    env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
-    timeoutMs: 10_000,
-    maxOutputBytes: VERSION_MAX_BYTES,
-  });
-  const raw = `${res.stderr}\n${res.stdout}`;
-  const m = VERSION_RE.exec(raw);
-  if (m === null) {
-    const err = new Error(`[Internal] cannot parse OpenSSH version from: ${res.stderr.trim() || res.stdout.trim()}`) as Error & {
-      code?: string;
-      kind?: string;
-    };
-    err.code = 'version_unparsed';
-    err.kind = 'Internal';
-    throw err;
-  }
-  return { raw: raw.trim(), major: Number(m[1]), minor: Number(m[2]) };
 }

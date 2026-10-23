@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/server';
-import { parseCliArgs } from '../../src/lifecycle.js';
+import { parseCliArgs } from '../../src/cli.js';
 import { createMcpServer, registerTools } from '../../src/server.js';
 import { UsageError } from '../../src/errors/classes.js';
 import type { Logger } from '../../src/types.js';

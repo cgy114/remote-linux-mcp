@@ -1,5 +1,5 @@
 import { promises as fs, constants as fsConstants } from 'node:fs';
-import type { EffectiveHost, ErrorFacts, JumpSpec, Logger, MCPPaths, SshSignatures } from '../types.js';
+import type { EffectiveHost, ErrorFacts, JumpSpec, Logger, SshSignatures } from '../types.js';
 import { resolveToolBinary } from './binary.js';
 import { buildChildEnv } from './env.js';
 import { spawnCapture } from './runner.js';
@@ -58,7 +58,6 @@ export interface AgentInspection {
  */
 export async function preflightAuth(input: {
   host: EffectiveHost;
-  paths: MCPPaths;
   log: Logger;
 }): Promise<AuthPreflightResult> {
   const { host, log } = input;
@@ -102,7 +101,6 @@ export async function preflightAuth(input: {
  * 不抛异常；spawn 失败按未知处理。
  */
 export async function preflightJump(input: {
-  host: EffectiveHost;
   jumps: JumpSpec[];
   log: Logger;
 }): Promise<JumpPreflightResult> {
