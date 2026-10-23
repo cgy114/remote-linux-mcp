@@ -227,8 +227,82 @@ export function effectiveHost(cfg: RemoteConfig, alias: string): EffectiveHost {
   };
   const identityFile = resolveIdentityFile(h.identityFile, cfg.baseDir);
   if (identityFile !== undefined) eff.identityFile = identityFile;
-  if (h.proxyJump !== undefined) eff.proxyJump = h.proxyJump;
+  if (h.proxyJump !== undefined) eff.proxyJump = normalizeProxyJump(cfg, a, h.proxyJump);
   return eff;
+}
+
+/**
+ * Rewrites a ProxyJump chain so every element that names a host alias in this
+ * config becomes a literal user@host:port. Alias hops expand their own
+ * proxy_jump chain (outermost first) and must not form a cycle.
+ */
+function normalizeProxyJump(cfg: RemoteConfig, target: string, raw: string): string {
+  const chain = expandJumpChain(cfg, raw, 0, new Set<string>([target]));
+  if (chain.length > MAX_JUMPS) {
+    throw usageError('invalid_jump', `at most ${MAX_JUMPS} jump hosts are allowed`);
+  }
+  return chain.map(serializeJumpSpec).join(',');
+}
+
+function expandJumpChain(
+  cfg: RemoteConfig,
+  raw: string,
+  depth: number,
+  seen: ReadonlySet<string>,
+): JumpSpec[] {
+  if (depth > MAX_JUMPS) {
+    throw usageError('invalid_jump', `jump chain deeper than ${MAX_JUMPS}`);
+  }
+  const specs = selectJumpSpec(raw);
+  const parts = raw.split(',');
+  const out: JumpSpec[] = [];
+  for (let i = 0; i < specs.length; i++) {
+    const spec = specs[i] as JumpSpec;
+    const part = parts[i] ?? '';
+    const aliasCfg = Object.prototype.hasOwnProperty.call(cfg.hosts, spec.host)
+      ? cfg.hosts[spec.host]
+      : undefined;
+    if (aliasCfg === undefined) {
+      // Literal host: keep the parsed spec (and its explicit port/user) as-is.
+      out.push(spec);
+    } else {
+      if (seen.has(spec.host)) {
+        throw usageError('invalid_jump', `jump alias cycle detected at ${JSON.stringify(spec.host)}`);
+      }
+      const nested = new Set(seen);
+      nested.add(spec.host);
+      if (aliasCfg.proxyJump !== undefined) {
+        out.push(...expandJumpChain(cfg, aliasCfg.proxyJump, depth + 1, nested));
+      }
+      const user = spec.user ?? aliasCfg.user;
+      const port = hasExplicitPort(part) ? spec.port : (aliasCfg.port ?? cfg.defaults.port);
+      const literal: JumpSpec = { host: aliasCfg.host, port: port ?? 22 };
+      if (user !== undefined) literal.user = user;
+      out.push(literal);
+    }
+    if (out.length > MAX_JUMPS) {
+      throw usageError('invalid_jump', `at most ${MAX_JUMPS} jump hosts are allowed`);
+    }
+  }
+  return out;
+}
+
+/** True when the raw chain element spells out a port ("h:22", "[::1]:22"). */
+function hasExplicitPort(raw: string): boolean {
+  const at = raw.indexOf('@');
+  const rest = at === -1 ? raw : raw.slice(at + 1);
+  if (rest.startsWith('[')) {
+    const close = rest.indexOf(']');
+    return close !== -1 && rest.slice(close + 1).startsWith(':');
+  }
+  return rest.includes(':');
+}
+
+/** Inverse of parseJump: `user@host`, `host:port` when non-22, `[v6]:port`. */
+function serializeJumpSpec(spec: JumpSpec): string {
+  let host = spec.host.includes(':') ? `[${spec.host}]` : spec.host;
+  if (spec.port !== undefined && spec.port !== 22) host += `:${spec.port}`;
+  return spec.user !== undefined ? `${spec.user}@${host}` : host;
 }
 
 export function describeHost(h: EffectiveHost): string {

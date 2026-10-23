@@ -5,9 +5,11 @@ import type { Defaults } from '../types.js';
 const ALIAS_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 /** 保留字：不能作为 host alias（与 CLI 子命令 / 内部名冲突）。 */
 const RESERVED_ALIASES: ReadonlySet<string> = new Set(['default', 'serve', 'trust']);
-/** host：非空、无空白、无控制字符、不以 - 开头。 */
-const HOST_RE = /^[^\s\p{Cc}-][^\s\p{Cc}]*$/u;
-const USER_RE = /^[A-Za-z0-9._-]{1,64}$/;
+/** host：非空、≤255、无空白/控制字符、不以 - 开头、不含 @ 和 /。 */
+const HOST_RE = /^(?!-)[^\s\p{Cc}@/]+$/u;
+const HOST_MAX_LENGTH = 255;
+/** user：首字符不能是 "-"，与 policy/alias 的 assertUser 保持一致。 */
+const USER_RE = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$/;
 
 const portSchema = z.number().int().min(1).max(65535);
 const positiveIntSchema = z.number().int().positive();
@@ -44,8 +46,13 @@ const securitySchema = z.strictObject({
 });
 
 const hostSchema = z.strictObject({
-  host: z.string().regex(HOST_RE, { message: 'host must be non-empty, without whitespace/control chars, and not start with "-"' }),
-  user: z.string().regex(USER_RE, { message: 'user must match ^[A-Za-z0-9._-]{1,64}$' }),
+  host: z
+    .string()
+    .max(HOST_MAX_LENGTH, { message: `host must be at most ${HOST_MAX_LENGTH} characters` })
+    .regex(HOST_RE, {
+      message: 'host must be non-empty and at most 255 characters, without whitespace/control chars, "@" or "/", and not start with "-"',
+    }),
+  user: z.string().regex(USER_RE, { message: 'user must match ^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$' }),
   port: portSchema.optional(),
   identity_file: z.string().min(1).optional(),
   proxy_jump: z.string().optional(),

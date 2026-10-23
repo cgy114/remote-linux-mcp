@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { ConfigError, TrustError } from '../errors/classes.js';
@@ -105,37 +106,54 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function tryCreateLock(file: string): Promise<boolean> {
+/** 创建锁并返回本次持有的唯一 token；已存在（EEXIST）返回 undefined。 */
+async function tryCreateLock(file: string): Promise<string | undefined> {
   let handle;
   try {
     handle = await fs.open(file, 'wx');
   } catch (err) {
-    if (isErrnoCode(err, 'EEXIST')) return false;
+    if (isErrnoCode(err, 'EEXIST')) return undefined;
     throw err;
   }
+  const token = randomUUID();
   try {
-    await handle.writeFile(JSON.stringify({ pid: process.pid, time: new Date().toISOString() }), 'utf8');
+    await handle.writeFile(
+      JSON.stringify({ pid: process.pid, token, time: new Date().toISOString() }),
+      'utf8',
+    );
   } catch (err) {
     await handle.close().catch(() => undefined);
     await fs.unlink(file).catch(() => undefined);
     throw err;
   }
   await handle.close();
-  return true;
+  return token;
 }
 
-/** 锁文件陈旧则删除并返回 true；锁已不存在也返回 true（立即重试）。 */
+/**
+ * 锁文件陈旧则原子回收并返回 true；锁已不存在也返回 true（立即重试）。
+ * 通过 rename 到唯一临时名来抢锁，避免 unlink 掉他人刚刚重建的锁。
+ */
 async function removeIfStale(file: string, staleMs: number): Promise<boolean> {
   let mtimeMs: number;
   try {
+    // 读取内容与 mtime，确认锁文件在判定前确实存在且是一个完整的锁记录。
+    await fs.readFile(file);
     mtimeMs = (await fs.stat(file)).mtimeMs;
   } catch (err) {
     if (isErrnoCode(err, 'ENOENT')) return true;
     throw err;
   }
   if (Date.now() - mtimeMs <= staleMs) return false;
+  const reclaimed = `${file}.reclaim-${randomUUID()}`;
   try {
-    await fs.unlink(file);
+    await fs.rename(file, reclaimed);
+  } catch (err) {
+    if (isErrnoCode(err, 'ENOENT')) return true;
+    throw err;
+  }
+  try {
+    await fs.unlink(reclaimed);
   } catch (err) {
     if (!isErrnoCode(err, 'ENOENT')) throw err;
   }
@@ -155,8 +173,10 @@ export async function acquireTrustLock(
   await ensureDir(path.dirname(file));
   const deadline = Date.now() + timeoutMs;
 
+  let token: string | undefined;
   for (;;) {
-    if (await tryCreateLock(file)) break;
+    token = await tryCreateLock(file);
+    if (token !== undefined) break;
     if (await removeIfStale(file, staleMs)) continue;
     if (Date.now() >= deadline) {
       throw new TrustError('lock_busy', `无法获取信任锁（${timeoutMs}ms 超时）：${file}`);
@@ -164,10 +184,26 @@ export async function acquireTrustLock(
     await sleep(LOCK_POLL_MS + Math.random() * LOCK_JITTER_MS);
   }
 
+  const heldToken = token;
   let released = false;
   return async () => {
     if (released) return;
     released = true;
+    let text: string;
+    try {
+      text = await fs.readFile(file, 'utf8');
+    } catch (err) {
+      if (isErrnoCode(err, 'ENOENT')) return;
+      throw err;
+    }
+    let record: unknown;
+    try {
+      record = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (typeof record !== 'object' || record === null) return;
+    if ((record as { token?: unknown }).token !== heldToken) return;
     try {
       await fs.unlink(file);
     } catch (err) {

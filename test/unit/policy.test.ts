@@ -309,6 +309,55 @@ describe('effectiveHost', () => {
   it('validates the alias first', () => {
     expect(codeOf(() => effectiveHost(cfg, 'Bad Alias'))).toBe('invalid_alias');
   });
+
+  describe('proxyJump normalization', () => {
+    function jumpConfig(): RemoteConfig {
+      const base = makeConfig(path.resolve('cfg-base'));
+      return {
+        ...base,
+        defaults: { ...base.defaults, port: 22 },
+        hosts: {
+          bastion: { host: '10.0.0.1', user: 'admin', port: 2222 },
+          inner: { host: '10.0.0.2', user: 'hop' },
+          mid: { host: '10.0.0.9', user: 'mu', proxyJump: 'bastion' },
+          db: { host: 'db.internal', user: 'ops', proxyJump: 'bastion' },
+          literal: { host: 'lit', user: 'u', proxyJump: 'jump.example.com' },
+          chain: { host: 'chain', user: 'u', proxyJump: 'bastion,inner' },
+          nested: { host: 'nested', user: 'u', proxyJump: 'mid' },
+          self: { host: 'selfhost', user: 'u', proxyJump: 'self' },
+          a: { host: 'ahost', user: 'u', proxyJump: 'b' },
+          b: { host: 'bhost', user: 'u', proxyJump: 'a' },
+        },
+      };
+    }
+    const jcfg = jumpConfig();
+
+    it('resolves an alias jump to user@host:port', () => {
+      expect(effectiveHost(jcfg, 'db').proxyJump).toBe('admin@10.0.0.1:2222');
+    });
+
+    it('keeps literal jump hosts unchanged', () => {
+      expect(effectiveHost(jcfg, 'literal').proxyJump).toBe('jump.example.com');
+    });
+
+    it('resolves a two-hop chain and omits port 22', () => {
+      expect(effectiveHost(jcfg, 'chain').proxyJump).toBe('admin@10.0.0.1:2222,hop@10.0.0.2');
+    });
+
+    it('expands a jump alias that has its own proxy_jump (outermost first)', () => {
+      expect(effectiveHost(jcfg, 'nested').proxyJump).toBe('admin@10.0.0.1:2222,mu@10.0.0.9');
+    });
+
+    it('rejects self-references and cycles with invalid_jump', () => {
+      expect(codeOf(() => effectiveHost(jcfg, 'self'))).toBe('invalid_jump');
+      expect(codeOf(() => effectiveHost(jcfg, 'a'))).toBe('invalid_jump');
+      expect(codeOf(() => effectiveHost(jcfg, 'b'))).toBe('invalid_jump');
+    });
+
+    it('leaves proxyJump undefined when not configured', () => {
+      expect(effectiveHost(jcfg, 'bastion').proxyJump).toBeUndefined();
+    });
+  });
 });
 
 describe('describeHost', () => {
@@ -381,6 +430,34 @@ describe('buildSshArgv', () => {
     const { argv } = buildSshArgv({ ...base, host: makeHost(), extra: ['-J', 'bastion'] });
     const sep = argv.indexOf('--');
     expect(argv.slice(sep - 2, sep)).toEqual(['-J', 'bastion']);
+  });
+
+  it('does not emit -i or -J when the host has neither', () => {
+    const { argv } = buildSshArgv({ ...base, host: makeHost() });
+    expect(argv).not.toContain('-i');
+    expect(argv).not.toContain('-J');
+  });
+
+  it('emits -i <path> after -p and -J <value> before "--"', () => {
+    const host = makeHost({ identityFile: '/home/deploy/.ssh/id_ed25519', proxyJump: 'bastion' });
+    const { argv, display } = buildSshArgv({ ...base, host });
+    const sep = argv.indexOf('--');
+    const p = argv.indexOf('-p');
+    const i = argv.indexOf('-i');
+    const j = argv.indexOf('-J');
+    expect(p).toBeGreaterThan(-1);
+    expect(argv[i + 1]).toBe('/home/deploy/.ssh/id_ed25519');
+    expect(argv[j + 1]).toBe('bastion');
+    expect(i).toBeGreaterThan(p);
+    expect(j).toBeGreaterThan(i);
+    expect(j).toBeLessThan(sep);
+    expect(display).toContain('/home/deploy/.ssh/id_ed25519');
+    expect(display).toContain('bastion');
+  });
+
+  it('omits -J for an empty proxyJump', () => {
+    const { argv } = buildSshArgv({ ...base, host: makeHost({ proxyJump: '' }) });
+    expect(argv).not.toContain('-J');
   });
 
   it('keeps remoteCommand as one argv element', () => {

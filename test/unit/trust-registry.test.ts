@@ -153,4 +153,44 @@ describe('acquireTrustLock', () => {
     await expect(fs.stat(lock)).resolves.toBeDefined();
     await next();
   });
+
+  it('release leaves a lock file whose token belongs to another holder', async () => {
+    const release = await acquireTrustLock(lock);
+    const foreign = JSON.stringify({ pid: 999_999, token: 'foreign-token', time: new Date().toISOString() });
+    await fs.writeFile(lock, foreign, 'utf8');
+    await release();
+    expect(await fs.readFile(lock, 'utf8')).toBe(foreign);
+  });
+
+  it('reclaims a stale lock atomically and removes both the lock and the temp name', async () => {
+    const stale = JSON.stringify({ pid: 1, token: 'old-token', time: '2000-01-01T00:00:00.000Z' });
+    await fs.writeFile(lock, stale, 'utf8');
+    const old = new Date(Date.now() - 120_000);
+    await fs.utimes(lock, old, old);
+
+    const release = await acquireTrustLock(lock, { staleMs: 1000, timeoutMs: 1000 });
+    const body = JSON.parse(await fs.readFile(lock, 'utf8')) as { pid: number; token: string };
+    expect(body.pid).toBe(process.pid);
+    expect(body.token).not.toBe('old-token');
+    expect((await fs.readdir(dir)).filter((n) => n.includes('.reclaim-'))).toEqual([]);
+    await release();
+    await expect(fs.stat(lock)).rejects.toThrow();
+  });
+
+  it('lets exactly one of two racing acquires win; the other reports lock_busy', async () => {
+    const settled = await Promise.allSettled([
+      acquireTrustLock(lock, { staleMs: 60_000, timeoutMs: 300 }),
+      acquireTrustLock(lock, { staleMs: 60_000, timeoutMs: 300 }),
+    ]);
+    const fulfilled = settled.filter(
+      (s): s is PromiseFulfilledResult<() => Promise<void>> => s.status === 'fulfilled',
+    );
+    const rejected = settled.filter(
+      (s): s is PromiseRejectedResult => s.status === 'rejected',
+    );
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.reason).toMatchObject({ name: 'TrustError', code: 'lock_busy' });
+    await fulfilled[0]?.value();
+  });
 });

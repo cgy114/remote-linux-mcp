@@ -111,10 +111,21 @@ describe('configSchema', () => {
       expect(ok(base({ hosts: { a: { host: '-oProxyCommand=x', user: 'u' } } }))).toBe(false);
     });
 
-    it('validates user against ^[A-Za-z0-9._-]{1,64}$', () => {
+    it('validates user against ^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$', () => {
       expect(ok(base({ hosts: { a: { host: 'h', user: 'bad user' } } }))).toBe(false);
       expect(ok(base({ hosts: { a: { host: 'h', user: 'x'.repeat(65) } } }))).toBe(false);
+      expect(ok(base({ hosts: { a: { host: 'h', user: '-deploy' } } }))).toBe(false);
       expect(ok(base({ hosts: { a: { host: 'h', user: 'ok.user_1-x' } } }))).toBe(true);
+    });
+
+    it('rejects hosts containing "@" or "/"', () => {
+      expect(ok(base({ hosts: { a: { host: 'admin@server', user: 'u' } } }))).toBe(false);
+      expect(ok(base({ hosts: { a: { host: 'a/b', user: 'u' } } }))).toBe(false);
+    });
+
+    it('rejects a host longer than 255 characters and accepts 255', () => {
+      expect(ok(base({ hosts: { a: { host: 'a'.repeat(256), user: 'u' } } }))).toBe(false);
+      expect(ok(base({ hosts: { a: { host: 'a'.repeat(255), user: 'u' } } }))).toBe(true);
     });
 
     it('validates optional port range', () => {
