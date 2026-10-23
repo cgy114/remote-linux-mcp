@@ -362,6 +362,10 @@ describe('runTrustFlow', () => {
     expect(out.action).toBe('failed');
     expect(out.error).toMatchObject({ kind: 'HostKey', code: 'registry_conflict' });
     expect(out.message).toContain('确认期间注册表已被其他操作修改');
+    // 并发冲突应给出可执行提示，而不是默认的“中间人风险”文案。
+    expect(out.error?.hint).toContain('重新运行 remote-mcp trust <alias>');
+    expect(out.error?.hint ?? '').not.toContain('中间人');
+    expect(out.message).toContain('重新运行 remote-mcp trust web-1');
     expect(calls.writeKnownHosts).toHaveLength(0);
     expect(calls.saveRegistry).toHaveLength(0);
     expect(calls.release).toBe(1);

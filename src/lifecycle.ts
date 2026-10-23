@@ -110,23 +110,5 @@ export async function withTimeout<T>(
   }
 }
 
-/** 可被 AbortSignal 取消的延时。取消时以 AbortError reject。 */
-export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const abortError = (): Error => Object.assign(new Error('sleep aborted'), { name: 'AbortError' });
-    if (signal?.aborted === true) {
-      reject(abortError());
-      return;
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const onAbort = (): void => {
-      if (timer !== undefined) clearTimeout(timer);
-      reject(abortError());
-    };
-    timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
-}
+// 保持原有导入路径可用；实现集中在 util/time（该项只依赖标准库，无循环依赖）。
+export { sleep } from './util/time.js';

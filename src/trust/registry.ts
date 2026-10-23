@@ -5,6 +5,7 @@ import { ConfigError, TrustError } from '../errors/classes.js';
 import { assertAlias } from '../policy/alias.js';
 import type { PinnedHostKey, TrustRegistry } from '../types.js';
 import { atomicWriteFile, ensureDir, isErrnoCode, readTextIfExists } from '../util/fsx.js';
+import { sleep } from '../util/time.js';
 import { fingerprintKey, isValidKeyBlob } from './fingerprint.js';
 
 const PIN_KEYS: readonly string[] = ['algorithm', 'keyBlob', 'fingerprint', 'firstSeenAt', 'lastVerifiedAt'];
@@ -102,10 +103,6 @@ export async function saveTrustRegistry(file: string, reg: TrustRegistry): Promi
   await atomicWriteFile(file, JSON.stringify(valid, null, 2) + '\n');
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /** 创建锁并返回本次持有的唯一 token；已存在（EEXIST）返回 undefined。 */
 async function tryCreateLock(file: string): Promise<string | undefined> {
   let handle;
@@ -130,21 +127,68 @@ async function tryCreateLock(file: string): Promise<string | undefined> {
   return token;
 }
 
+/** 读取并解析锁记录；ENOENT / 非 JSON / 非对象时返回 undefined。 */
+async function readLockRecord(file: string): Promise<Record<string, unknown> | undefined> {
+  let text: string;
+  try {
+    text = await fs.readFile(file, 'utf8');
+  } catch (err) {
+    if (isErrnoCode(err, 'ENOENT')) return undefined;
+    throw err;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  return isPlainObject(parsed) ? parsed : undefined;
+}
+
+/**
+ * 把为校验而移走的锁尽量放回原路径；目标已存在或恢复失败时保留临时名。
+ * 宁可留下一个临时文件，也不覆盖或删除不属于自己的锁。
+ */
+async function restoreMoved(moved: string, file: string): Promise<void> {
+  try {
+    await fs.access(file);
+    return; // 目标已存在：保留临时名
+  } catch (err) {
+    if (!isErrnoCode(err, 'ENOENT')) return;
+  }
+  try {
+    await fs.rename(moved, file);
+  } catch {
+    // 保留临时名（例如 Windows 上目标刚被创建，rename 不会覆盖）
+  }
+}
+
 /**
  * 锁文件陈旧则原子回收并返回 true；锁已不存在也返回 true（立即重试）。
- * 通过 rename 到唯一临时名来抢锁，避免 unlink 掉他人刚刚重建的锁。
+ * 先读取 token 与 mtime，再 rename 到唯一临时名，之后复核被移走文件的 token：
+ * 只有确认移走的仍是判定时那把陈旧锁才 unlink；期间被替换为新锁则尝试放回，返回 false。
  */
 async function removeIfStale(file: string, staleMs: number): Promise<boolean> {
+  let text: string;
   let mtimeMs: number;
   try {
-    // 读取内容与 mtime，确认锁文件在判定前确实存在且是一个完整的锁记录。
-    await fs.readFile(file);
+    text = await fs.readFile(file, 'utf8');
     mtimeMs = (await fs.stat(file)).mtimeMs;
   } catch (err) {
     if (isErrnoCode(err, 'ENOENT')) return true;
     throw err;
   }
+
+  let record: unknown;
+  try {
+    record = JSON.parse(text);
+  } catch {
+    record = undefined;
+  }
+  const tokenBefore = isPlainObject(record) ? record['token'] : undefined;
+
   if (Date.now() - mtimeMs <= staleMs) return false;
+
   const reclaimed = `${file}.reclaim-${randomUUID()}`;
   try {
     await fs.rename(file, reclaimed);
@@ -152,12 +196,36 @@ async function removeIfStale(file: string, staleMs: number): Promise<boolean> {
     if (isErrnoCode(err, 'ENOENT')) return true;
     throw err;
   }
+
+  let movedText: string;
   try {
-    await fs.unlink(reclaimed);
+    movedText = await fs.readFile(reclaimed, 'utf8');
   } catch (err) {
-    if (!isErrnoCode(err, 'ENOENT')) throw err;
+    if (isErrnoCode(err, 'ENOENT')) return true;
+    throw err;
   }
-  return true;
+  let movedRecord: unknown;
+  try {
+    movedRecord = JSON.parse(movedText);
+  } catch {
+    movedRecord = undefined;
+  }
+  const tokenAfter = isPlainObject(movedRecord) ? movedRecord['token'] : undefined;
+
+  // 可解析时比较 token；坏锁则比较原文。一致说明移走的仍是判定时的陈旧锁。
+  const same = tokenBefore !== undefined ? tokenAfter === tokenBefore : movedText === text;
+  if (same) {
+    try {
+      await fs.unlink(reclaimed);
+    } catch (err) {
+      if (!isErrnoCode(err, 'ENOENT')) throw err;
+    }
+    return true;
+  }
+
+  // 判定后锁已被新持有者替换：放回原路径，放弃本次回收。
+  await restoreMoved(reclaimed, file);
+  return false;
 }
 
 /**
@@ -189,25 +257,30 @@ export async function acquireTrustLock(
   return async () => {
     if (released) return;
     released = true;
-    let text: string;
+
+    // 1) 读取并解析；只有 token 仍是本次持有者时才继续。
+    const current = await readLockRecord(file);
+    if (current === undefined || current.token !== heldToken) return;
+
+    // 2) 原子移走，避免 unlink 掉在此期间被替换的新锁。
+    const moved = `${file}.release-${heldToken}`;
     try {
-      text = await fs.readFile(file, 'utf8');
+      await fs.rename(file, moved);
     } catch (err) {
       if (isErrnoCode(err, 'ENOENT')) return;
       throw err;
     }
-    let record: unknown;
-    try {
-      record = JSON.parse(text);
-    } catch {
+
+    // 3) 复核被移走的文件：内容已更换则恢复，绝不删除别人的锁。
+    const checked = await readLockRecord(moved);
+    if (checked !== undefined && checked.token === heldToken) {
+      try {
+        await fs.unlink(moved);
+      } catch (err) {
+        if (!isErrnoCode(err, 'ENOENT')) throw err;
+      }
       return;
     }
-    if (typeof record !== 'object' || record === null) return;
-    if ((record as { token?: unknown }).token !== heldToken) return;
-    try {
-      await fs.unlink(file);
-    } catch (err) {
-      if (!isErrnoCode(err, 'ENOENT')) throw err;
-    }
+    await restoreMoved(moved, file);
   };
 }

@@ -32,6 +32,10 @@ describe('resolveToolBinary', () => {
 });
 
 describe('resolveSshBinary', () => {
+  it('takes no parameters (the dead env parameter was removed)', () => {
+    expect(resolveSshBinary).toHaveLength(0);
+  });
+
   it('returns a path and a source of path or system', async () => {
     const r = await resolveSshBinary();
     expect(path.isAbsolute(r.path)).toBe(true);

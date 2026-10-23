@@ -62,9 +62,7 @@ export async function resolveToolBinary(name: ToolName): Promise<string> {
 }
 
 /** 解析 ssh 路径；位于 System32\OpenSSH 下视为 system，否则 path。 */
-export async function resolveSshBinary(
-  _env?: NodeJS.ProcessEnv,
-): Promise<{ path: string; source: 'path' | 'system' }> {
+export async function resolveSshBinary(): Promise<{ path: string; source: 'path' | 'system' }> {
   const p = await resolveToolBinary('ssh');
   const sysDir = path.join(systemRoot(), 'System32', 'OpenSSH').toLowerCase();
   const source = IS_WIN && path.dirname(p).toLowerCase() === sysDir ? 'system' : 'path';

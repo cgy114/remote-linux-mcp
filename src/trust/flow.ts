@@ -345,6 +345,8 @@ async function runSteps(o: TrustFlowOptions, d: TrustFlowDeps): Promise<TrustFlo
         code: 'registry_conflict',
         message: '确认期间注册表已被修改',
       });
+      // 默认 HostKey hint 讲的是指纹/中间人风险，这里是并发改写，换成可执行的指引。
+      error.hint = '确认期间信任注册表被其他操作修改，请重新运行 remote-mcp trust <alias>。';
       return {
         ok: false,
         action: 'failed',

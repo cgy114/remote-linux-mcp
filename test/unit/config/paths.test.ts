@@ -143,7 +143,8 @@ describe('expandHome', () => {
     expect(expandHome('~/a/b.yaml', home)).toBe(path.join(home, 'a', 'b.yaml'));
   });
 
-  it('expands ~\\... (Windows separator)', () => {
+  // path.join 在非 Windows 平台使用 "/"，该断言只对 Windows 语义成立。
+  it.skipIf(process.platform !== 'win32')('expands ~\\... (Windows separator)', () => {
     expect(expandHome('~\\a\\b.yaml', home)).toBe(path.join(home, 'a', 'b.yaml'));
   });
 

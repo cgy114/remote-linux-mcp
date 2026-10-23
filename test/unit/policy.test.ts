@@ -306,6 +306,15 @@ describe('effectiveHost', () => {
     expect(cfg.defaults.timeouts.connectMs).toBe(5000);
   });
 
+  it('treats an empty proxy_jump as undefined (no throw, no -J)', () => {
+    const cfg2 = makeConfig(baseDir);
+    cfg2.hosts['emptyjump'] = { host: 'empty.example', user: 'u', proxyJump: '' };
+    const eff = effectiveHost(cfg2, 'emptyjump');
+    expect(eff.proxyJump).toBeUndefined();
+    const { argv } = buildSshArgv({ knownHostsFile: KH, mode: 'strict', host: eff });
+    expect(argv).not.toContain('-J');
+  });
+
   it('throws unknown_alias for missing hosts, including prototype keys', () => {
     expect(codeOf(() => effectiveHost(cfg, 'nope'))).toBe('unknown_alias');
     expect(codeOf(() => effectiveHost(cfg, 'constructor'))).toBe('unknown_alias');
@@ -463,6 +472,12 @@ describe('buildSshArgv', () => {
   it('omits -J for an empty proxyJump', () => {
     const { argv } = buildSshArgv({ ...base, host: makeHost({ proxyJump: '' }) });
     expect(argv).not.toContain('-J');
+  });
+
+  it('omits -i for an empty identityFile', () => {
+    const { argv, display } = buildSshArgv({ ...base, host: makeHost({ identityFile: '' }) });
+    expect(argv).not.toContain('-i');
+    expect(display).not.toContain('-i ');
   });
 
   it('keeps remoteCommand as one argv element', () => {

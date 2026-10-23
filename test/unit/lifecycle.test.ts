@@ -44,17 +44,17 @@ describe('sleep', () => {
     await expect(sleep(1)).resolves.toBeUndefined();
   });
 
-  it('rejects with AbortError when the signal is aborted', async () => {
+  it('resolves early when the signal is aborted', async () => {
     const ac = new AbortController();
     const p = sleep(10_000, ac.signal);
     ac.abort();
-    await expect(p).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(p).resolves.toBeUndefined();
   });
 
-  it('rejects immediately when the signal is already aborted', async () => {
+  it('resolves immediately when the signal is already aborted', async () => {
     const ac = new AbortController();
     ac.abort();
-    await expect(sleep(10_000, ac.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(sleep(10_000, ac.signal)).resolves.toBeUndefined();
   });
 });
 

@@ -223,7 +223,8 @@ export function effectiveHost(cfg: RemoteConfig, alias: string): EffectiveHost {
   };
   const identityFile = resolveIdentityFile(h.identityFile, cfg.baseDir);
   if (identityFile !== undefined) eff.identityFile = identityFile;
-  if (h.proxyJump !== undefined) eff.proxyJump = normalizeProxyJump(cfg, a, h.proxyJump);
+  // 空串与未配置等价：selectJumpSpec('') 会把空串当成非法跳板，不应进入规范化。
+  if (h.proxyJump !== undefined && h.proxyJump !== '') eff.proxyJump = normalizeProxyJump(cfg, a, h.proxyJump);
   return eff;
 }
 
@@ -267,7 +268,7 @@ function expandJumpChain(
       }
       const nested = new Set(seen);
       nested.add(spec.host);
-      if (aliasCfg.proxyJump !== undefined) {
+      if (aliasCfg.proxyJump !== undefined && aliasCfg.proxyJump !== '') {
         out.push(...expandJumpChain(cfg, aliasCfg.proxyJump, depth + 1, nested));
       }
       const user = spec.user ?? aliasCfg.user;

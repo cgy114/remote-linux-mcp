@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigError, TrustError } from '../../src/errors/classes.js';
 import { fingerprintKey } from '../../src/trust/fingerprint.js';
 import { acquireTrustLock, loadTrustRegistry, saveTrustRegistry } from '../../src/trust/registry.js';
@@ -160,6 +160,66 @@ describe('acquireTrustLock', () => {
     await fs.writeFile(lock, foreign, 'utf8');
     await release();
     expect(await fs.readFile(lock, 'utf8')).toBe(foreign);
+  });
+
+  it('release deletes only its own lock and leaves no .release-* temp files', async () => {
+    const release = await acquireTrustLock(lock);
+    await release();
+    await expect(fs.stat(lock)).rejects.toThrow();
+    expect((await fs.readdir(dir)).filter((n) => n.includes('.release-'))).toEqual([]);
+  });
+
+  it('release restores a lock that was replaced between the token check and the rename', async () => {
+    const release = await acquireTrustLock(lock);
+    const foreign = JSON.stringify({ pid: 999_999, token: 'foreign-token', time: new Date().toISOString() });
+    const realRename = fs.rename;
+    let injected = false;
+    const spy = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      // 模拟竞争者在 release 读完 token 之后、rename 之前替换锁文件。
+      if (!injected && String(from) === lock) {
+        injected = true;
+        await fs.writeFile(lock, foreign, 'utf8');
+      }
+      return realRename(from, to);
+    });
+    try {
+      await release();
+    } finally {
+      spy.mockRestore();
+    }
+    // 恢复分支：新锁必须留在原路径，不能被删除。
+    expect(await fs.readFile(lock, 'utf8')).toBe(foreign);
+    expect((await fs.readdir(dir)).filter((n) => n.includes('.release-'))).toEqual([]);
+  });
+
+  it('does not reclaim a stale lock that a fresh holder installed during the rename', async () => {
+    const stale = JSON.stringify({ pid: 1, token: 'old-token', time: '2000-01-01T00:00:00.000Z' });
+    await fs.writeFile(lock, stale, 'utf8');
+    const old = new Date(Date.now() - 120_000);
+    await fs.utimes(lock, old, old);
+
+    const fresh = JSON.stringify({ pid: process.pid, token: 'fresh-token', time: new Date().toISOString() });
+    const realRename = fs.rename;
+    let injected = false;
+    const spy = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      // 模拟陈旧判定之后、rename 之前新持有者重建了锁。
+      if (!injected && String(from) === lock) {
+        injected = true;
+        await fs.writeFile(lock, fresh, 'utf8');
+      }
+      return realRename(from, to);
+    });
+    try {
+      await expect(acquireTrustLock(lock, { staleMs: 1000, timeoutMs: 250 })).rejects.toMatchObject({
+        name: 'TrustError',
+        code: 'lock_busy',
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    // 复核 token 不一致：新锁放回原路径，且没有 .reclaim-* 残留。
+    expect(await fs.readFile(lock, 'utf8')).toBe(fresh);
+    expect((await fs.readdir(dir)).filter((n) => n.includes('.reclaim-'))).toEqual([]);
   });
 
   it('reclaims a stale lock atomically and removes both the lock and the temp name', async () => {

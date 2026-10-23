@@ -57,7 +57,7 @@ export function buildSshArgv(input: {
   if (host.port !== 22) {
     argv.push('-p', String(host.port));
   }
-  if (host.identityFile !== undefined) {
+  if (host.identityFile !== undefined && host.identityFile !== '') {
     argv.push('-i', host.identityFile);
   }
   if (host.proxyJump !== undefined && host.proxyJump !== '') {
