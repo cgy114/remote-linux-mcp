@@ -39,8 +39,15 @@ interface ToolCallResult {
   structuredContent?: unknown;
 }
 
+interface ToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
 interface ToolsListResult {
-  tools?: Array<{ name?: string; annotations?: { readOnlyHint?: boolean } }>;
+  tools?: Array<{ name?: string; annotations?: ToolAnnotations }>;
 }
 
 interface ExitInfo {
@@ -336,11 +343,41 @@ async function assertToolsListed(harness: ServerHarness, id: number): Promise<vo
   const result = response.result as ToolsListResult;
   const tools = result.tools ?? [];
   const names = tools.map((tool) => tool.name);
-  expect(names).toContain('host_list');
-  expect(names).toContain('host_check');
-  expect(names).toContain('ssh_exec');
-  const sshExec = tools.find((tool) => tool.name === 'ssh_exec');
-  expect(sshExec?.annotations?.readOnlyHint).toBe(false);
+  for (const name of [
+    'host_list',
+    'host_check',
+    'ssh_exec',
+    'ssh_upload',
+    'ssh_download',
+    'ssh_read_file',
+    'ssh_write_file',
+  ]) {
+    expect(names).toContain(name);
+  }
+  expect(names).toHaveLength(7);
+
+  const annotationsOf = (name: string): ToolAnnotations | undefined =>
+    tools.find((tool) => tool.name === name)?.annotations;
+
+  expect(annotationsOf('ssh_exec')).toMatchObject({
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+  });
+  for (const name of ['ssh_upload', 'ssh_download', 'ssh_write_file']) {
+    expect(annotationsOf(name)).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    });
+  }
+  expect(annotationsOf('ssh_read_file')).toEqual({
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  });
 }
 
 /** 单次 CLI 运行（不进入 MCP 会话），用于未知命令等场景。 */
