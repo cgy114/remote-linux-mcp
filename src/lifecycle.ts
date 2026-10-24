@@ -1,3 +1,4 @@
+import { flushAuditSinks } from './audit/sink.js';
 import { serializeError } from './log.js';
 import { killAllTrackedChildren } from './ssh/runner.js';
 import type { Logger } from './types.js';
@@ -47,21 +48,60 @@ export function installSignalHandlers(opts: SignalHandlerOptions): () => void {
   };
 }
 
+/** 退出前等待审计队列落盘的上限；超时只 warn，不阻止退出。 */
+export const DEFAULT_AUDIT_FLUSH_MS = 1000;
+
 let shutdownPromise: Promise<void> | undefined;
 
 /**
- * 关闭：杀掉所有受跟踪的子进程，最多等待 graceMs。幂等（同一进程内只执行一次）。
- * 永不 reject。
+ * 有界地等待所有审计 sink 的队列排空。永不 reject，失败/超时只写 warn。
+ * server.ts 的两条关闭路径与 shutdown 在退出前都会调用它。
  */
-export function shutdown(opts: { reason: string; log: Logger; graceMs?: number }): Promise<void> {
+export async function flushAuditBeforeExit(
+  log: Logger,
+  timeoutMs: number = DEFAULT_AUDIT_FLUSH_MS,
+): Promise<void> {
+  try {
+    const result = await withTimeout(flushAuditSinks(), timeoutMs);
+    if (!result.ok) {
+      try {
+        log.warn({ timeoutMs }, 'audit flush exceeded shutdown budget');
+      } catch {
+        // 日志失败不影响退出。
+      }
+    }
+  } catch (err) {
+    try {
+      log.warn({ err: serializeError(err) }, 'audit flush failed');
+    } catch {
+      // 日志失败不影响退出。
+    }
+  }
+}
+
+/**
+ * 关闭：杀掉所有受跟踪的子进程，最多等待 graceMs；随后有界地 flush 审计。
+ * 幂等（同一进程内只执行一次）。永不 reject。
+ */
+export function shutdown(opts: {
+  reason: string;
+  log: Logger;
+  graceMs?: number;
+  auditFlushMs?: number;
+}): Promise<void> {
   if (shutdownPromise === undefined) {
     shutdownPromise = runShutdown(opts);
   }
   return shutdownPromise;
 }
 
-async function runShutdown(opts: { reason: string; log: Logger; graceMs?: number }): Promise<void> {
-  const { reason, log, graceMs = 2000 } = opts;
+async function runShutdown(opts: {
+  reason: string;
+  log: Logger;
+  graceMs?: number;
+  auditFlushMs?: number;
+}): Promise<void> {
+  const { reason, log, graceMs = 2000, auditFlushMs = DEFAULT_AUDIT_FLUSH_MS } = opts;
   try {
     log.info({ reason }, 'shutting down');
     const killing = killAllTrackedChildren().catch((err: unknown) => {
@@ -77,6 +117,9 @@ async function runShutdown(opts: { reason: string; log: Logger; graceMs?: number
     } catch {
       // 日志失败不影响关闭
     }
+  } finally {
+    // 无论子进程终止是否报错，都尝试把已排队的审计写完。
+    await flushAuditBeforeExit(log, auditFlushMs);
   }
 }
 

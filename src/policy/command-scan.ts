@@ -102,7 +102,7 @@ export function tokenize(input: string): string[] {
  * 为 deny 扫描生成“骨架”：
  * - 去掉 `\` 续行与其他转义反斜杠（`\rm` -> `rm`）
  * - 去掉空引号对（`r''m` -> `rm`，`r""m` -> `rm`）
- * - `$IFS` / `${IFS}` -> 空格
+ * - `$IFS` / `${IFS}` / `${IFS:- }` / `${IFS:+x}` 等 -> 空格
  * - 折叠水平空白，保留换行作为片段分隔
  *
  * 该结果绝不能用于执行，只用于匹配 deny 规则。
@@ -111,7 +111,8 @@ export function normalizeSkeleton(command: string): string {
   let out = command.replace(/\\\r?\n/g, '');
   out = out.replace(/\\([^\n])/g, '$1');
   out = out.replace(/(['"])\1/g, '');
-  out = out.replace(/\$\{IFS\}|\$IFS/g, ' ');
+  // 任意 `${IFS...}` 参数展开（默认值/替代值/长度等）都视为空白分隔符。
+  out = out.replace(/\$\{IFS[^}]*\}|\$IFS/g, ' ');
   out = out.replace(/[ \t\r\f\v]+/g, ' ');
   out = out.replace(/\n+/g, '\n');
   return out.trim();
@@ -253,8 +254,13 @@ const SHELL_KEYWORDS = new Set([
 ]);
 
 /**
- * 去掉片段开头的环境赋值、`command`/`builtin` 包装、shell 关键字，
- * 仅用于 deny 扫描（不改变引号与其余内容）。
+ * 去掉片段开头的环境赋值、`command`/`builtin`/`timeout`/`nohup`/`nice`
+ * 包装、shell 关键字，仅用于 deny 扫描（不改变引号与其余内容）。
+ *
+ * 包装器只剥离到内部命令为止：
+ * - `timeout [-s SIG] [-k DUR] ... DURATION COMMAND`（DURATION 支持 10 / 10s / 1.5m）
+ * - `nohup [--] COMMAND`
+ * - `nice [-n N|--adjustment[=]N|-N] COMMAND`
  */
 export function stripLeadingNoise(text: string): string {
   let out = text;
@@ -263,6 +269,15 @@ export function stripLeadingNoise(text: string): string {
     out = out.replace(/^\s+/, '');
     out = out.replace(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+/, '');
     out = out.replace(/^(?:command|builtin)(?:\s+-[^\s]+)*\s+/, '');
+    out = out.replace(/^nohup(?:\s+--)?\s+/, '');
+    out = out.replace(
+      /^nice(?:\s+(?:-n\s+\S+|--adjustment(?:=\S+|\s+\S+)|-\+?\d+|--?\S+))*\s+/,
+      '',
+    );
+    out = out.replace(
+      /^timeout(?:\s+(?:-\S+(?:\s+[^\s-]\S*)?))*\s+\d+(?:\.\d+)?[smhd]?\s+/,
+      '',
+    );
     const keyword =
       /^(?:(?:if|then|else|elif|do|while|until|for|case)(?=\s|$)|[!{}(]|\$\()/.exec(out);
     if (keyword !== null) {

@@ -306,7 +306,7 @@ describe('runCredentialCommand', () => {
     expect(err.text()).toMatch(/must not be empty/);
   });
 
-  it('set rejects an invalid credential name', async () => {
+  it('set rejects an invalid credential name as a usage error', async () => {
     const provider = new MemoryCredentialProvider();
     const err = capture();
     const code = await runCredentialCommand(setCmd('bad name', true), log, {
@@ -315,9 +315,22 @@ describe('runCredentialCommand', () => {
       stdout: capture().stream,
       stderr: err.stream,
     });
-    expect(code).toBe(EXIT.config);
+    expect(code).toBe(EXIT.usage);
     expect(err.text()).toMatch(/credential name/);
     expect(err.text()).not.toContain('hunter2');
+  });
+
+  it('status/delete also reject an invalid credential name as usage', async () => {
+    for (const cmd of [statusCmd('bad/name'), deleteCmd('bad name')]) {
+      const err = capture();
+      const code = await runCredentialCommand(cmd, log, {
+        provider: new MemoryCredentialProvider(),
+        stdout: capture().stream,
+        stderr: err.stream,
+      });
+      expect(code).toBe(EXIT.usage);
+      expect(err.text()).toMatch(/credential name/);
+    }
   });
 
   it('status reports present/not found without exposing the secret', async () => {

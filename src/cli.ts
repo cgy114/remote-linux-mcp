@@ -6,6 +6,7 @@ import { loadConfig } from './config/load.js';
 import { resolvePaths } from './config/paths.js';
 import { EXIT } from './constants.js';
 import {
+  assertCredentialName,
   CredentialError,
   getCredentialProvider,
   MAX_CREDENTIAL_BYTES,
@@ -315,6 +316,15 @@ export async function runCredentialCommand(
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
   const stdin = options.stdin ?? process.stdin;
+
+  // 非法凭据名是命令行用法错误（不是存储错误），在接触凭据库前返回 EXIT.usage。
+  try {
+    assertCredentialName(cmd.ref);
+  } catch (err) {
+    const message = err instanceof CredentialError ? err.message : 'invalid credential name';
+    stderr.write(`remote-mcp: ${message}\n`);
+    return EXIT.usage;
+  }
 
   let provider: WritableCredentialProvider;
   try {

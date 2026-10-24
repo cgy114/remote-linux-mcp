@@ -6,6 +6,7 @@ import {
   classifySudoRun,
   composeSudoStdin,
   isSudoCommand,
+  stripLeadingSudoCommand,
 } from '../../../src/policy/sudo.js';
 
 function codeOf(fn: () => unknown): string | undefined {
@@ -26,7 +27,7 @@ describe('buildSudoRemoteCommand', () => {
       limits: DEFAULT_EXEC_LIMITS,
     });
     expect(plan.sudoMode).toBe('passwordless');
-    expect(plan.remoteCommand.startsWith('sudo -n -- /bin/bash -lc ')).toBe(true);
+    expect(plan.remoteCommand.startsWith('LC_ALL=C sudo -n -- /bin/bash -lc ')).toBe(true);
     expect(plan.remoteCommand).toContain('builtin cd -- "$HOME"');
     expect(plan.remoteCommand.endsWith("id'")).toBe(true);
     expect(plan.inner.cwd).toBe('~');
@@ -41,7 +42,7 @@ describe('buildSudoRemoteCommand', () => {
       cwd: '/srv/app',
     });
     expect(plan.sudoMode).toBe('password');
-    expect(plan.remoteCommand.startsWith("sudo -S -k -p '' -- /bin/bash -lc ")).toBe(true);
+    expect(plan.remoteCommand.startsWith("LC_ALL=C sudo -S -k -p '' -- /bin/bash -lc ")).toBe(true);
     expect(plan.inner.cwd).toBe('/srv/app');
   });
 
@@ -70,6 +71,13 @@ describe('buildSudoRemoteCommand', () => {
         buildSudoRemoteCommand({ command: '', mode: 'passwordless', limits: DEFAULT_EXEC_LIMITS }),
       ),
     ).toBe('invalid_command');
+  });
+
+  it('forces an English locale for sudo diagnostics in both modes', () => {
+    for (const mode of ['passwordless', 'password'] as const) {
+      const plan = buildSudoRemoteCommand({ command: 'id', mode, limits: DEFAULT_EXEC_LIMITS });
+      expect(plan.remoteCommand.startsWith('LC_ALL=C sudo ')).toBe(true);
+    }
   });
 
   it('enforces remote size limits', () => {
@@ -125,12 +133,17 @@ describe('classifySudoRun', () => {
 });
 
 describe('isSudoCommand', () => {
-  it.each(['sudo ls', 'su -', 'doas ls', 'pkexec ls', 'command sudo ls', 'FOO=1 sudo ls'])(
-    'recognizes %j',
-    (command) => {
-      expect(isSudoCommand(command)).toBe(true);
-    },
-  );
+  it.each([
+    'sudo ls',
+    'su -',
+    'doas ls',
+    'pkexec ls',
+    'command sudo ls',
+    'FOO=1 sudo ls',
+    '/usr/bin/sudo ls',
+  ])('recognizes %j', (command) => {
+    expect(isSudoCommand(command)).toBe(true);
+  });
 
   it.each(['ls', 'echo sudo', 'sudoedit file', 'ls && sudo reboot'])(
     'does not recognize %j as a leading sudo command',
@@ -138,4 +151,41 @@ describe('isSudoCommand', () => {
       expect(isSudoCommand(command)).toBe(false);
     },
   );
+});
+
+describe('stripLeadingSudoCommand', () => {
+  it.each([
+    ['sudo systemctl restart nginx', 'systemctl restart nginx'],
+    ['sudo -n id', 'id'],
+    ['sudo -S -k -- id', 'id'],
+    ['sudo -u root systemctl status', 'systemctl status'],
+    ['sudo --user=root systemctl status', 'systemctl status'],
+    ['doas -u root id', 'id'],
+    ['pkexec --user root id', 'id'],
+    ['/usr/bin/sudo -n id', 'id'],
+    ['su -c "systemctl status"', 'systemctl status'],
+    ['su -c id', 'id'],
+    ['FOO=1 sudo id', 'FOO=1 id'],
+    ['command sudo id', 'command id'],
+    ['sudo id; ls', 'id; ls'],
+  ])('strips %j -> %j', (command, expected) => {
+    expect(stripLeadingSudoCommand(command)).toBe(expected);
+  });
+
+  it('leaves non-sudo commands untouched', () => {
+    expect(stripLeadingSudoCommand('systemctl status')).toBe('systemctl status');
+    expect(stripLeadingSudoCommand('ls && sudo reboot')).toBe('ls && sudo reboot');
+  });
+
+  it('refuses unsafe/ambiguous prefixes instead of changing semantics', () => {
+    // sudo 没有内部命令。
+    expect(stripLeadingSudoCommand('sudo -n')).toBe('sudo -n');
+    expect(stripLeadingSudoCommand('sudo')).toBe('sudo');
+    // 选项缺少参数。
+    expect(stripLeadingSudoCommand('sudo -u')).toBe('sudo -u');
+    // su 依赖登录 shell / 用户语义，只有 -c 形式可安全剥离。
+    expect(stripLeadingSudoCommand('su -')).toBe('su -');
+    expect(stripLeadingSudoCommand('su root')).toBe('su root');
+    expect(stripLeadingSudoCommand('su - root -c id')).toBe('su - root -c id');
+  });
 });

@@ -38,6 +38,14 @@ const SENSITIVE_KEY_RE =
   /(?:password|passwd|pwd|passphrase|secret|token|authorization|api[-_]?key|private[-_]?key|credential|cookie|set-cookie)/i;
 
 /**
+ * 键名是否属于敏感键（审计与日志共用同一套规则）。
+ * 注意：正则不带 g，可安全重复调用。
+ */
+export function isSensitiveAuditKey(key: string): boolean {
+  return SENSITIVE_KEY_RE.test(key);
+}
+
+/**
  * 递归脱敏任意 JSON 可序列化值：
  * - 字符串走 redactAuditText
  * - 敏感键整体替换为 [REDACTED]
@@ -58,7 +66,7 @@ export function redactAuditRecord(value: unknown): unknown {
       if (v instanceof Date) return v.toISOString();
       const out: Record<string, unknown> = {};
       for (const [key, child] of Object.entries(v)) {
-        out[key] = SENSITIVE_KEY_RE.test(key) ? REDACTED : walk(child);
+        out[key] = isSensitiveAuditKey(key) ? REDACTED : walk(child);
       }
       return out;
     } finally {

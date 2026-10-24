@@ -28,6 +28,30 @@ describe('policyError', () => {
     expect(policyError(new ConfigError('schema', 'bad')).code).toBe('config_schema');
     expect(policyError(new ConfigError('io', 'bad')).code).toBe('config_io');
   });
+
+  it('preserves UsageError details (action/code/ruleId/surface/reason)', () => {
+    const error = new UsageError('denied', { code: 'policy_denied' });
+    (error as UsageError & { details?: Record<string, unknown> }).details = {
+      action: 'deny',
+      code: 'policy_denied',
+      ruleId: 'rm-rf-root',
+      surface: 'ssh_exec',
+      reason: 'recursive delete',
+    };
+    const converted = policyError(error);
+    expect(converted).toMatchObject({
+      kind: 'Policy',
+      code: 'policy_denied',
+      message: 'denied',
+      details: {
+        action: 'deny',
+        code: 'policy_denied',
+        ruleId: 'rm-rf-root',
+        surface: 'ssh_exec',
+        reason: 'recursive delete',
+      },
+    });
+  });
 });
 
 describe('toolErrorResult', () => {

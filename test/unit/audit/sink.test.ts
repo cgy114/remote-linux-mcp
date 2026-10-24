@@ -174,6 +174,16 @@ describe('appendAuditRecord / auditSinkFor', () => {
     expect(lines).toEqual([{ a: 1 }, { a: 2 }]);
   });
 
+  it('keys sinks without collisions on separator-like path components', () => {
+    // 若内部 key 使用可打印分隔符（如 ":::"），下面两个 (dir, file) 组合会撞 key。
+    const first = auditSinkFor(dir, log, ':::audit.jsonl');
+    const second = auditSinkFor(`${dir}:::`, log, 'audit.jsonl');
+    expect(first).not.toBe(second);
+
+    const firstAgain = auditSinkFor(dir, log, ':::audit.jsonl');
+    expect(firstAgain).toBe(first);
+  });
+
   it('supports a custom active file', async () => {
     await appendAuditRecord(
       { tool: 'custom' },

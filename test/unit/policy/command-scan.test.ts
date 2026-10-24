@@ -34,6 +34,13 @@ describe('normalizeSkeleton', () => {
     expect(normalizeSkeleton('rm$IFS-rf$IFS/')).toBe('rm -rf /');
   });
 
+  it('expands parameter-expanded IFS forms to whitespace', () => {
+    expect(normalizeSkeleton('rm${IFS:- }-rf${IFS:- }/')).toBe('rm -rf /');
+    expect(normalizeSkeleton('rm${IFS:+x}-rf${IFS:+x}/')).toBe('rm -rf /');
+    expect(normalizeSkeleton('rm${IFS:=z}-rf${IFS:=z}/')).toBe('rm -rf /');
+    expect(normalizeSkeleton('rm${IFS%?}-rf${IFS%?}/')).toBe('rm -rf /');
+  });
+
   it('collapses horizontal whitespace but keeps newlines as separators', () => {
     expect(normalizeSkeleton('  ls   -la  ')).toBe('ls -la');
     expect(normalizeSkeleton('ls\n\nrm -rf /')).toBe('ls\nrm -rf /');
@@ -136,6 +143,28 @@ describe('stripLeadingNoise', () => {
   it('does not mangle commands sharing a keyword prefix', () => {
     expect(stripLeadingNoise('ifconfig eth0')).toBe('ifconfig eth0');
     expect(stripLeadingNoise('donesomething')).toBe('donesomething');
+  });
+
+  it('strips timeout/nohup/nice wrappers down to the inner command', () => {
+    expect(stripLeadingNoise('timeout 10 rm -rf /')).toBe('rm -rf /');
+    expect(stripLeadingNoise('timeout 1.5m rm -rf /')).toBe('rm -rf /');
+    expect(stripLeadingNoise('timeout -s KILL 10 rm -rf /')).toBe('rm -rf /');
+    expect(stripLeadingNoise('timeout --foreground 10 rm -rf /')).toBe('rm -rf /');
+    expect(stripLeadingNoise('nohup rm -rf /')).toBe('rm -rf /');
+    expect(stripLeadingNoise('nohup -- rm -rf /')).toBe('rm -rf /');
+    expect(stripLeadingNoise('nice rm -rf /')).toBe('rm -rf /');
+    expect(stripLeadingNoise('nice -n 5 rm -rf /')).toBe('rm -rf /');
+    expect(stripLeadingNoise('nice --adjustment=5 rm -rf /')).toBe('rm -rf /');
+    expect(stripLeadingNoise('nice --adjustment 5 rm -rf /')).toBe('rm -rf /');
+    expect(stripLeadingNoise('nice -5 rm -rf /')).toBe('rm -rf /');
+    expect(stripLeadingNoise('nice -n 5 timeout 10 rm -rf /')).toBe('rm -rf /');
+  });
+
+  it('does not strip wrapper-like words without the wrapper syntax', () => {
+    expect(stripLeadingNoise('timeout')).toBe('timeout');
+    expect(stripLeadingNoise('timeouts 10 rm -rf /')).toBe('timeouts 10 rm -rf /');
+    expect(stripLeadingNoise('nohupx rm -rf /')).toBe('nohupx rm -rf /');
+    expect(stripLeadingNoise('nicely rm -rf /')).toBe('nicely rm -rf /');
   });
 });
 

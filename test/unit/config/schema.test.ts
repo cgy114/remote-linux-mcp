@@ -208,7 +208,7 @@ describe('defaultsFor', () => {
       defaultCwd: '~',
       timeouts: { connectMs: 5000, commandMs: 15000, checkMs: 8000 },
       maxOutputBytes: 1048576,
-      sudo: { mode: 'off', allow: [], deny: [] },
+      sudo: { mode: 'off', allow: [], deny: [], allowRules: [], denyRules: [] },
       files: {
         localRoots: [],
         remoteDeny: [],
@@ -261,7 +261,30 @@ describe('defaultsFor', () => {
       defaultCwd: '/srv',
       timeouts: { connectMs: 1000, commandMs: 15000, checkMs: 8000 },
       maxOutputBytes: 8192,
-      sudo: { mode: 'password', credential: 'sudo-pw', allow: ['systemctl *'], deny: ['rm *'] },
+      sudo: {
+        mode: 'password',
+        credential: 'sudo-pw',
+        allow: ['systemctl *'],
+        deny: ['rm *'],
+        allowRules: [
+          {
+            raw: 'systemctl *',
+            kind: 'prefix',
+            source: 'sudo',
+            id: 'sudo:allow:0',
+            prefix: 'systemctl *',
+          },
+        ],
+        denyRules: [
+          {
+            raw: 'rm *',
+            kind: 'prefix',
+            source: 'sudo',
+            id: 'sudo:deny:0',
+            prefix: 'rm *',
+          },
+        ],
+      },
       files: {
         localRoots: [],
         remoteDeny: [],

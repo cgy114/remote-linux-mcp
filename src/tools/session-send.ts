@@ -2,15 +2,15 @@ import type { CallToolResult } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { sha256Hex } from '../audit/audit.js';
 import { makeToolError } from '../errors/taxonomy.js';
-import { evaluateCommandPolicy } from '../policy/command-policy.js';
+import { assertCommandPolicy, evaluateCommandPolicy } from '../policy/command-policy.js';
 import { buildSessionSendAudit } from '../session/audit.js';
 import { formatSessionSend } from '../session/format.js';
 import { validateSessionSendInput as validateSendInput } from '../policy/session.js';
 import { effectiveHost } from '../policy/target.js';
 import { checkTrust, trustFactToToolError } from '../pipeline/trust.js';
 import type { Session } from '../session/session.js';
-import type { RemoteConfig } from '../types.js';
-import { toolErrorResult, type ToolContext } from './common.js';
+import type { RemoteConfig, ToolError } from '../types.js';
+import { errorToToolError, toolErrorResult, type ToolContext } from './common.js';
 import {
   appendSessionAudit,
   requireSession,
@@ -61,17 +61,15 @@ export async function sessionSend(
       surface: 'session_send',
     });
     if (decision.action !== 'allow') {
-      const error = makeToolError('Policy', {
-        code: decision.code,
-        message: decision.reason,
-        details: {
-          action: decision.action,
-          code: decision.code,
-          ruleId: decision.ruleId,
-          surface: decision.surface,
-          reason: decision.reason,
-        },
-      });
+      // 与 ssh_exec/ssh_sudo 共用 assertCommandPolicy -> policyError 的映射（保留 details）。
+      let error: ToolError;
+      try {
+        assertCommandPolicy(decision);
+        // assertCommandPolicy 对非 allow 必定抛出；这里仅为类型收窄。
+        error = makeToolError('Policy', { code: decision.code, message: decision.reason });
+      } catch (e) {
+        error = errorToToolError(e, ctx.log);
+      }
       await appendSessionAudit(
         buildSessionSendAudit({
           sessionId: session.id,

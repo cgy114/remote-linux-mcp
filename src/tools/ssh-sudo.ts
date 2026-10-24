@@ -8,9 +8,12 @@ import {
   type CredentialProvider,
   type SecretMaterial,
 } from '../credentials/index.js';
-import { UsageError } from '../errors/classes.js';
 import { makeToolError } from '../errors/taxonomy.js';
-import { evaluateCommandPolicy, evaluateSudoPolicy } from '../policy/command-policy.js';
+import {
+  assertCommandPolicy,
+  evaluateCommandPolicy,
+  evaluateSudoPolicy,
+} from '../policy/command-policy.js';
 import {
   DEFAULT_EXEC_LIMITS,
   validateExecInput as validateRemoteCommandInput,
@@ -19,11 +22,12 @@ import {
   buildSudoRemoteCommand,
   classifySudoRun,
   composeSudoStdin,
+  stripLeadingSudoCommand,
   type SudoRemotePlan,
 } from '../policy/sudo.js';
 import { runSshOperation } from '../pipeline/operation.js';
 import { runSshCommand } from '../pipeline/run-command.js';
-import type { CommandDecision, RunResult, ToolError } from '../types.js';
+import type { RunResult, ToolError } from '../types.js';
 import { errorToToolError, toolErrorResult, type ToolAnnotations, type ToolContext } from './common.js';
 import { execFailure, formatExecResult, EXEC_LIMITS } from './ssh-exec.js';
 
@@ -59,18 +63,6 @@ interface SudoPlan {
 interface SudoProduced {
   run?: RunResult;
   credentialError?: ToolError;
-}
-
-function policyUsage(decision: CommandDecision): UsageError {
-  const error = new UsageError(decision.reason, { code: decision.code });
-  (error as UsageError & { details?: Record<string, unknown> }).details = {
-    action: decision.action,
-    code: decision.code,
-    ruleId: decision.ruleId,
-    surface: decision.surface,
-    reason: decision.reason,
-  };
-  return error;
 }
 
 /** 凭据层错误 -> 工具错误。绝不把底层 message（可能含实现细节）透出。 */
@@ -154,38 +146,45 @@ export async function sshSudo(input: SshSudoInput, ctx: ToolContext): Promise<Ca
       toolName: 'ssh_sudo',
       prepare: async (target) => {
         const policy = target.config.security.commandPolicy;
+        // ssh_sudo 本身已经提权；允许用户传入 `sudo ...` 并剥掉冗余前缀，
+        // 否则 hard-sudo 会误拒，远端也会形成嵌套 sudo。
+        const command = stripLeadingSudoCommand(input.command);
 
-        const commandDecision = evaluateCommandPolicy({
-          command: input.command,
-          policy,
-          surface: 'ssh_sudo',
-        });
-        if (commandDecision.action !== 'allow') throw policyUsage(commandDecision);
+        assertCommandPolicy(
+          evaluateCommandPolicy({
+            command,
+            policy,
+            surface: 'ssh_sudo',
+          }),
+        );
 
-        const sudoDecision = evaluateSudoPolicy({
-          command: input.command,
-          sudo: target.host.sudo,
-          surface: 'ssh_sudo',
-          policyMode: policy.mode,
-        });
-        if (sudoDecision.action !== 'allow') throw policyUsage(sudoDecision);
+        assertCommandPolicy(
+          evaluateSudoPolicy({
+            command,
+            sudo: target.host.sudo,
+            surface: 'ssh_sudo',
+            policyMode: policy.mode,
+          }),
+        );
 
-        validateRemoteCommandInput({ command: input.command });
+        validateRemoteCommandInput({ command });
 
         const mode = target.host.sudo.mode;
         observedMode = mode;
         if (mode === 'off') {
           // evaluateSudoPolicy 已拒绝；保留防御性分支。
-          throw policyUsage({
+          assertCommandPolicy({
             action: 'deny',
             code: 'sudo_disabled',
             reason: 'sudo 已在配置中关闭',
             surface: 'ssh_sudo',
           });
+          // assertCommandPolicy 必定抛错；这里显式收窄 mode 的类型。
+          throw new Error('unreachable: sudo is disabled');
         }
 
         const remote = buildSudoRemoteCommand({
-          command: input.command,
+          command,
           mode,
           limits: {
             maxRemoteUtf16: DEFAULT_EXEC_LIMITS.maxRemoteUtf16,

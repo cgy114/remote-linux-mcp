@@ -347,10 +347,17 @@ describe('ssh_exec unit', () => {
 
       expect(result.isError).toBe(true);
       const structured = result.structuredContent as {
-        error: { kind: string; code: string };
+        error: { kind: string; code: string; details?: Record<string, unknown> };
       };
       expect(structured.error.kind).toBe('Policy');
       expect(structured.error.code).toBe('policy_denied');
+      expect(structured.error.details).toMatchObject({
+        action: 'deny',
+        code: 'policy_denied',
+        surface: 'ssh_exec',
+        ruleId: 'hard-bash',
+      });
+      expect(typeof structured.error.details?.['reason']).toBe('string');
       expect(runSshMock).not.toHaveBeenCalled();
 
       const auditPath = path.join(paths.configDir, 'audit.jsonl');

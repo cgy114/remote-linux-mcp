@@ -32,7 +32,9 @@ const RM_RF =
 export const BUILTIN_RULE_DEFS: readonly BuiltinRuleDef[] = [
   {
     id: 'rm-rf-root',
-    spec: re(String.raw`${RM_RF}\/(?:\s|$)`),
+    // 根目录及其 glob/dot 变体：`/`、`/*`、`//`、`/.`、`/..`、`/**`。
+    // 只匹配紧跟 `/` 的空白、结尾或 `*`、`.`、`/`，因此 `/tmp` 不受影响。
+    spec: re(String.raw`${RM_RF}\/(?:[/.*]|\s|$)`),
     reason: '递归强制删除根目录 /',
     dangerous: true,
   },
@@ -133,7 +135,9 @@ export const BUILTIN_RULE_DEFS: readonly BuiltinRuleDef[] = [
   },
   {
     id: 'iptables-flush',
-    spec: re(String.raw`iptables\s+(?:--?[A-Za-z]+\s+)*-F(?:\s|$)`),
+    // 允许 `-t nat` / `--table nat` 等带参数的选项出现在 `-F`/`--flush` 之前。
+    // 逐 token 跳过：flush 必须是独立参数，避免误伤 `-F` 之外的文本。
+    spec: re(String.raw`iptables\s+(?:[^\s;&|\n]+\s+)*(?:-F|--flush)(?:\s|$)`),
     reason: '清空防火墙规则',
     dangerous: true,
   },

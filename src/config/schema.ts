@@ -54,18 +54,6 @@ const timeoutsSchema = z.strictObject({
 /** credential 名：字母数字开头，后续允许 . _ : -，最长 128。 */
 const CREDENTIAL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-const sudoSchema = z.strictObject({
-  mode: z.enum(['off', 'passwordless', 'password']).optional(),
-  credential: z
-    .string()
-    .regex(CREDENTIAL_RE, {
-      message: 'credential must match ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$',
-    })
-    .optional(),
-  allow: z.array(z.string()).optional(),
-  deny: z.array(z.string()).optional(),
-});
-
 /** 单条命令规则：语法在解析期校验（re: 可编译、prefix: 非空）。 */
 const commandRuleSpecSchema = z.string().min(1).superRefine((value, ctx) => {
   try {
@@ -76,6 +64,22 @@ const commandRuleSpecSchema = z.string().min(1).superRefine((value, ctx) => {
       message: err instanceof Error ? err.message : 'invalid command rule',
     });
   }
+});
+
+/**
+ * sudo 规则与 command_policy 使用同一套语法：`re:` 必须可编译、`prefix:` 不得为空。
+ * defaultsFor 会在加载期把它们预编译为 CommandRule。
+ */
+const sudoSchema = z.strictObject({
+  mode: z.enum(['off', 'passwordless', 'password']).optional(),
+  credential: z
+    .string()
+    .regex(CREDENTIAL_RE, {
+      message: 'credential must match ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$',
+    })
+    .optional(),
+  allow: z.array(commandRuleSpecSchema).optional(),
+  deny: z.array(commandRuleSpecSchema).optional(),
 });
 
 /** security.command_policy 严格对象。read_only 下 allow 只允许安全的前缀规则。 */
@@ -272,10 +276,15 @@ export function defaultsFor(raw: RawConfig, opts?: DefaultsForOptions): Defaults
   const d = raw.defaults;
   const t = d?.timeouts;
   const s = d?.sudo;
+  const allow = [...(s?.allow ?? [])];
+  const deny = [...(s?.deny ?? [])];
   const sudo: Defaults['sudo'] = {
     mode: s?.mode ?? 'off',
-    allow: [...(s?.allow ?? [])],
-    deny: [...(s?.deny ?? [])],
+    allow,
+    deny,
+    // 加载期预编译，避免每次 evaluateSudoPolicy 重新解析正则。
+    allowRules: allow.map((spec, index) => parseRule(spec, 'sudo', `sudo:allow:${index}`)),
+    denyRules: deny.map((spec, index) => parseRule(spec, 'sudo', `sudo:deny:${index}`)),
   };
   if (s?.credential !== undefined) sudo.credential = s.credential;
   if (sudo.mode === 'password' && sudo.credential === undefined) {

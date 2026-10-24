@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigError } from '../../../src/errors/classes.js';
 import { auditFor, commandPolicyFor, configSchema, defaultsFor } from '../../../src/config/schema.js';
+import { evaluateSudoPolicy } from '../../../src/policy/command-policy.js';
+import { parseRule } from '../../../src/policy/command-rules.js';
 
 const HOST = { host: '10.0.0.5', user: 'deploy' };
 
@@ -57,7 +59,7 @@ describe('read_only allow restrictions', () => {
     ).toBe(false);
   });
 
-  it.each(['bash', 'sh', 'python3', 'perl', 'node', 'awk', 'env', 'xargs', 'find', 'sed', 'tar', 'rsync', 'ssh', 'docker', 'sudo', 'su', 'eval', 'exec', 'source', 'command', 'builtin', 'export', 'set', 'unset', 'alias', 'trap'])(
+  it.each(['bash', 'sh', 'python3', 'perl', 'node', 'awk', 'env', 'xargs', 'timeout', 'nohup', 'nice', 'find', 'sed', 'tar', 'rsync', 'ssh', 'docker', 'sudo', 'su', 'eval', 'exec', 'source', 'command', 'builtin', 'export', 'set', 'unset', 'alias', 'trap'])(
     'rejects allow %s in read_only mode',
     (program) => {
       expect(
@@ -178,6 +180,70 @@ describe('sudo credential validation', () => {
     const defaults = defaultsFor(raw);
     expect(defaults.sudo.allow).toEqual(['systemctl *']);
     expect(defaults.sudo.deny).toEqual(['re:^rm']);
+  });
+});
+
+describe('sudo rule syntax', () => {
+  it('rejects the same invalid rules as command_policy', () => {
+    expect(ok(base({ defaults: { sudo: { allow: ['re:['] } } }))).toBe(false);
+    expect(ok(base({ defaults: { sudo: { deny: ['prefix:'] } } }))).toBe(false);
+    expect(ok(base({ defaults: { sudo: { deny: ['   '] } } }))).toBe(false);
+    expect(ok(base({ defaults: { sudo: { deny: [42] } } }))).toBe(false);
+  });
+
+  it('accepts regex and prefix rules', () => {
+    expect(
+      ok(
+        base({
+          defaults: {
+            sudo: { allow: ['prefix:systemctl', 're:^df\\s'], deny: ['prefix:rm -rf'] },
+          },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('precompiles sudo rules in defaultsFor', () => {
+    const raw = configSchema.parse(
+      base({
+        defaults: {
+          sudo: { mode: 'passwordless', allow: ['re:^systemctl\\s'], deny: ['prefix:rm'] },
+        },
+      }),
+    );
+    const defaults = defaultsFor(raw);
+    expect(defaults.sudo.allowRules).toEqual([
+      {
+        raw: 're:^systemctl\\s',
+        kind: 're',
+        source: 'sudo',
+        id: 'sudo:allow:0',
+        regex: expect.any(RegExp),
+      },
+    ]);
+    expect(defaults.sudo.allowRules?.[0]?.regex?.test('systemctl restart')).toBe(true);
+    expect(defaults.sudo.denyRules).toEqual([
+      {
+        raw: 'prefix:rm',
+        kind: 'prefix',
+        source: 'sudo',
+        id: 'sudo:deny:0',
+        prefix: 'rm',
+      },
+    ]);
+  });
+
+  it('uses precompiled rules instead of re-parsing raw strings at evaluation time', () => {
+    // raw 规则本身非法；若求值时重新 parse 会抛 ConfigError。
+    const sudo = {
+      mode: 'passwordless' as const,
+      allow: ['re:['],
+      deny: [],
+      allowRules: [parseRule('prefix:ls', 'sudo', 'test:allow')],
+      denyRules: [],
+    };
+    const decision = evaluateSudoPolicy({ command: 'ls -la', sudo, surface: 'ssh_sudo' });
+    expect(decision.action).toBe('allow');
   });
 });
 

@@ -684,10 +684,17 @@ describe('session_send', () => {
 
     expect(result.isError).toBe(true);
     const structured = result.structuredContent as {
-      error: { kind: string; code: string };
+      error: { kind: string; code: string; details?: Record<string, unknown> };
     };
     expect(structured.error.kind).toBe('Policy');
     expect(structured.error.code).toBe('policy_read_only');
+    // 与 ssh_exec/ssh_sudo 一致：拒绝细节保留在 details 中。
+    expect(structured.error.details).toMatchObject({
+      action: 'deny',
+      code: 'policy_read_only',
+      surface: 'session_send',
+    });
+    expect(typeof structured.error.details?.['reason']).toBe('string');
     expect(sendCalls).toBe(0);
     expect(registry.get('sess_fake')).toBeDefined();
 

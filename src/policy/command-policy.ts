@@ -304,6 +304,7 @@ export function assertCommandPolicy(decision: CommandDecision): void {
     code: decision.code,
     ruleId: decision.ruleId,
     surface: decision.surface,
+    reason: decision.reason,
   });
 }
 
@@ -317,8 +318,7 @@ function compileSudoRules(sided: 'allow' | 'deny', specs: readonly string[]): Co
  */
 export function evaluateSudoPolicy(input: EvaluateSudoPolicyInput): CommandDecision {
   const { sudo, surface } = input;
-  const sudoMode = (sudo as { mode?: string }).mode;
-  if (input.policyMode === 'read_only' || sudoMode === 'read_only') {
+  if (input.policyMode === 'read_only') {
     return makeDecision('deny', 'policy_read_only', 'read_only 模式禁止使用 sudo', surface);
   }
   if (sudo.mode === 'off') {
@@ -326,13 +326,14 @@ export function evaluateSudoPolicy(input: EvaluateSudoPolicyInput): CommandDecis
   }
 
   const context = scanContext(input.command);
-  const denyRules = compileSudoRules('deny', sudo.deny);
+  // 加载期已预编译（defaultsFor）；直接构造的 sudo 对象才回退到按字符串解析。
+  const denyRules = sudo.denyRules ?? compileSudoRules('deny', sudo.deny);
   const denyHit = findRule(denyRules, context);
   if (denyHit !== undefined) {
     return makeDecision('deny', 'policy_denied', commandRuleReason(denyHit), surface, denyHit.id);
   }
 
-  const allowRules = compileSudoRules('allow', sudo.allow);
+  const allowRules = sudo.allowRules ?? compileSudoRules('allow', sudo.allow);
   if (allowRules.length === 0) {
     return makeDecision('allow', 'policy_allowed', 'sudo 命令未配置 allow 规则，默认放行', surface);
   }

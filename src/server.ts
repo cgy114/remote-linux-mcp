@@ -5,7 +5,7 @@ import { resolvePaths } from './config/paths.js';
 import { EXIT } from './constants.js';
 import { ConfigError } from './errors/classes.js';
 import { serializeError } from './log.js';
-import { installSignalHandlers, shutdown } from './lifecycle.js';
+import { flushAuditBeforeExit, installSignalHandlers, shutdown } from './lifecycle.js';
 import { SHUTDOWN_BUDGET_MS } from './session/constants.js';
 import { getSessionRegistry } from './session/registry.js';
 import { registerTool, type ToolContext } from './tools/common.js';
@@ -319,6 +319,8 @@ export async function serve(opts: ServeOptions): Promise<number> {
       onShutdown: (reason) => {
         void (async () => {
           await closeAllSessions(reason);
+          // 明确在退出前等待审计队列；shutdown 内部还会再 flush 一次（幂等）。
+          await flushAuditBeforeExit(log);
           await shutdown({ reason, log });
           await handle?.close().catch(() => undefined);
           finish();
@@ -342,6 +344,8 @@ export async function serve(opts: ServeOptions): Promise<number> {
     uninstall();
     uninstall = undefined;
     await closeAllSessions('transport_closed');
+    // 传输关闭路径同样在退出前等待审计落盘（有界，失败只 warn）。
+    await flushAuditBeforeExit(log);
     await shutdown({ reason: 'transport_closed', log });
     return EXIT.ok;
   } catch (err) {

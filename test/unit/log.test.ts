@@ -133,6 +133,25 @@ describe('redact', () => {
     expect(out['y']).toEqual({ v: 1 });
   });
 
+  it('shares the audit sensitive-key rules (credential/pwd/passphrase/cookie)', () => {
+    const out = redact({
+      credential: 'c',
+      pwd: 'p',
+      passphrase: 'pp',
+      cookie: 'ck',
+      'set-cookie': 'sc',
+      SetCookie: 'sc2',
+      username: 'bob',
+    }) as Record<string, unknown>;
+    expect(out['credential']).toBe('[REDACTED]');
+    expect(out['pwd']).toBe('[REDACTED]');
+    expect(out['passphrase']).toBe('[REDACTED]');
+    expect(out['cookie']).toBe('[REDACTED]');
+    expect(out['set-cookie']).toBe('[REDACTED]');
+    expect(out['SetCookie']).toBe('[REDACTED]');
+    expect(out['username']).toBe('bob');
+  });
+
   it('accepts extra key names to redact', () => {
     expect(redact({ host: 'h', custom: 'c' }, ['custom'])).toEqual({ host: 'h', custom: '[REDACTED]' });
   });

@@ -117,6 +117,8 @@ const SENSITIVE_ENV_KEYS: ReadonlySet<string> = new Set([
   'PROMPT_COMMAND',
   'PS4',
   'GIT_SSH_COMMAND',
+  'GIT_SSH',
+  'GIT_SSH_VARIANT',
   'GIT_PAGER',
   'PAGER',
   'SSH_ASKPASS',
@@ -161,6 +163,9 @@ const FORBIDDEN_PROGRAMS: ReadonlySet<string> = new Set([
   // 包装器 / 命令通道
   'env',
   'xargs',
+  'timeout',
+  'nohup',
+  'nice',
   'find',
   'sed',
   'tar',

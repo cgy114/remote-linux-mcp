@@ -1,9 +1,8 @@
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { appendAuditRecord, buildExecAuditRecord, sha256Hex } from '../audit/audit.js';
-import { UsageError } from '../errors/classes.js';
 import { classifyExit, stderrSignatures, toUserError } from '../errors/classify.js';
-import { evaluateCommandPolicy } from '../policy/command-policy.js';
+import { assertCommandPolicy, evaluateCommandPolicy } from '../policy/command-policy.js';
 import { runSshOperation } from '../pipeline/operation.js';
 import { runSshCommand } from '../pipeline/run-command.js';
 import type { ResolvedTarget } from '../pipeline/target.js';
@@ -94,23 +93,15 @@ export async function sshExec(input: SshExecInput, ctx: ToolContext): Promise<Ca
     toolName: 'ssh_exec',
     prepare: (target) => {
       // 策略求值必须在构建命令/获取租约之前；deny/confirm 一律视为拒绝。
-      const decision = evaluateCommandPolicy({
-        command: input.command,
-        policy: target.config.security.commandPolicy,
-        surface: 'ssh_exec',
-        envKeys: Object.keys(input.env ?? {}),
-      });
-      if (decision.action !== 'allow') {
-        const error = new UsageError(decision.reason, { code: decision.code });
-        (error as UsageError & { details?: Record<string, unknown> }).details = {
-          action: decision.action,
-          code: decision.code,
-          ruleId: decision.ruleId,
-          surface: decision.surface,
-          reason: decision.reason,
-        };
-        throw error;
-      }
+      // 与其他工具共用同一套映射：assertCommandPolicy -> UsageError -> Policy 错误。
+      assertCommandPolicy(
+        evaluateCommandPolicy({
+          command: input.command,
+          policy: target.config.security.commandPolicy,
+          surface: 'ssh_exec',
+          envKeys: Object.keys(input.env ?? {}),
+        }),
+      );
 
       const plan = buildExecCommand({
         command: input.command,

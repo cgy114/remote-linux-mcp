@@ -68,6 +68,14 @@ describe('read_only mode', () => {
     expect(ro('ls', { surface: 'ssh_sudo' }).code).toBe('policy_read_only');
   });
 
+  it('denies shell wrappers even when their inner command is allow-listed', () => {
+    for (const command of ['timeout 10 df -h', 'nohup df -h', 'nice -n 5 df -h']) {
+      const decision = ro(command);
+      expect(decision.action).toBe('deny');
+      expect(decision.code).toBe('policy_read_only_unsafe');
+    }
+  });
+
   it('denies interpreters even if a programmatic policy allows them', () => {
     const policy = compileCommandPolicy({
       mode: 'read_only',
@@ -82,6 +90,15 @@ describe('read_only mode', () => {
   it('allows a pipe when every segment is allowed', () => {
     expect(ro('ls | cat').action).toBe('allow');
   });
+});
+
+describe('sensitive env keys', () => {
+  it.each(['GIT_SSH', 'GIT_SSH_VARIANT', 'GIT_SSH_COMMAND'])(
+    'treats %s as sensitive',
+    (key) => {
+      expect(ro('ls', { envKeys: [key] }).code).toBe('policy_read_only_env');
+    },
+  );
 });
 
 describe('decision priority', () => {
@@ -186,7 +203,10 @@ describe('assertCommandPolicy', () => {
       expect((err as UsageError).code).toBe('policy_denied');
       expect((err as UsageError & { details?: Record<string, unknown> }).details).toMatchObject({
         action: 'deny',
+        code: 'policy_denied',
         ruleId: 'rm-rf-root',
+        surface: 'ssh_exec',
+        reason: 'recursive delete',
       });
     }
   });

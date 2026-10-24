@@ -11,6 +11,11 @@ function action(command: string): string {
 /** 至少 30 条内置危险命令。 */
 const DANGEROUS: readonly string[] = [
   'rm -rf /',
+  'rm -rf /*',
+  'rm -rf //',
+  'rm -rf /.',
+  'rm -rf /..',
+  'rm -rf /**',
   'rm -rf ~',
   'rm -rf $HOME',
   'rm -rf ${HOME}',
@@ -39,6 +44,11 @@ const DANGEROUS: readonly string[] = [
   'chmod -R 777 /',
   'chown -R nobody /',
   'iptables -F',
+  'iptables -t nat -F',
+  'iptables --table nat -F',
+  'iptables -t nat -F INPUT',
+  'iptables --flush',
+  'iptables -t nat --flush',
   'nft flush ruleset',
   'ufw disable',
   'setenforce 0',
@@ -96,6 +106,8 @@ const SAFE: readonly string[] = [
   'rm -rf /tmp/build',
   'rm -rf ./build',
   'rm -rf build',
+  'iptables -L',
+  'iptables -t nat -L',
   'dd if=/dev/zero of=/tmp/file bs=1M count=1',
   'kill -9 12345',
   'mv /tmp/a /tmp/b',
@@ -137,6 +149,19 @@ describe('configuration overrides', () => {
   });
 });
 
+describe('wrapper stripping', () => {
+  it.each([
+    'timeout 10 df -h',
+    'timeout -s KILL 5s df -h',
+    'nohup df -h',
+    'nice df -h',
+    'nice -n 5 df -h',
+    'nice -5 df -h',
+  ])('allows wrapped safe command %j in enforce mode', (command) => {
+    expect(action(command)).toBe('allow');
+  });
+});
+
 describe('bypass corpus', () => {
   it.each([
     "r''m -rf /",
@@ -144,6 +169,12 @@ describe('bypass corpus', () => {
     '\\rm -rf /',
     'rm${IFS}-rf${IFS}/',
     'rm$IFS-rf$IFS/',
+    'rm${IFS:- }-rf${IFS:- }/',
+    'rm${IFS:+x}-rf${IFS:+x}/',
+    'timeout 10 rm -rf /',
+    'nohup rm -rf /',
+    'nice -n 5 rm -rf /',
+    'nice --adjustment 5 rm -rf /',
     'ls; rm -rf /',
     'ls && rm -rf /',
     'ls || reboot',

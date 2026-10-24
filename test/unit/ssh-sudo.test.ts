@@ -204,7 +204,49 @@ describe('ssh_sudo unit', () => {
     const result = await sshSudo({ host: 'web1', command: 'reboot' }, ctx);
     expect(result.isError).toBe(true);
     expect(errorOf(result)).toMatchObject({ kind: 'Policy', code: 'policy_denied' });
+    const structured = result.structuredContent as {
+      error: { details?: Record<string, unknown> };
+    };
+    expect(structured.error.details).toMatchObject({
+      action: 'deny',
+      code: 'policy_denied',
+      surface: 'ssh_sudo',
+    });
+    expect(typeof structured.error.details?.['reason']).toBe('string');
     expect(runSshMock).not.toHaveBeenCalled();
+  });
+
+  it('strips a redundant leading sudo instead of rejecting it as hard-sudo', async () => {
+    await installTrust();
+    runSshMock.mockResolvedValue(makeRun());
+
+    const result = await sshSudo(
+      { host: 'web1', command: 'sudo systemctl restart nginx' },
+      ctx,
+    );
+    expect(result.isError).not.toBe(true);
+    expect(runSshMock).toHaveBeenCalledTimes(1);
+
+    const call = runSshMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    const argv = call['argv'] as string[];
+    const remote = argv[argv.length - 1] ?? '';
+    expect(remote.startsWith('LC_ALL=C sudo -n -- /bin/bash -lc ')).toBe(true);
+    expect(remote).not.toContain('sudo systemctl');
+    expect(remote).toContain('systemctl restart nginx');
+  });
+
+  it('strips sudo options with arguments before executing', async () => {
+    await installTrust();
+    runSshMock.mockResolvedValue(makeRun());
+
+    const result = await sshSudo({ host: 'web1', command: 'sudo -u root id -u' }, ctx);
+    expect(result.isError).not.toBe(true);
+
+    const call = runSshMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    const argv = call['argv'] as string[];
+    const remote = argv[argv.length - 1] ?? '';
+    expect(remote).not.toContain('sudo -u');
+    expect(remote).toContain('id -u');
   });
 
   it('runs passwordless sudo with -n and no stdin', async () => {
@@ -268,7 +310,7 @@ describe('ssh_sudo unit', () => {
     const result = await sshSudo({ host: 'web1', command: 'id' }, ctx);
     expect(result.isError).not.toBe(true);
     expect(seenStdin).toBe(`${PASSWORD}\n`);
-    expect(seenArgv.join(' ')).toContain("sudo -S -k -p '' --");
+    expect(seenArgv.join(' ')).toContain("LC_ALL=C sudo -S -k -p '' --");
     expect(seenArgv.join(' ')).not.toContain(PASSWORD);
     expect(JSON.stringify(seenEnv)).not.toContain(PASSWORD);
 

@@ -54,7 +54,8 @@ security:
       - prefix:ls
       - prefix:cat
     confirm:
-      - re: '\b(shutdown|reboot)\b'
+      # YAML 双引号里反斜杠需要写成 \\，否则 \b 会被解释为退格
+      - "re:\\b(shutdown|reboot)\\b"
     deny:
       - prefix:mkfs
   audit:

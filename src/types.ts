@@ -101,8 +101,12 @@ export interface Defaults {
   sudo: {
     mode: 'off' | 'passwordless' | 'password';
     credential?: string;
+    /** 原始规则文本（保留用于展示/审计）。 */
     allow: string[];
     deny: string[];
+    /** 加载期预编译的规则；手工构造 Defaults 时可省略，求值时再解析。 */
+    allowRules?: CommandRule[];
+    denyRules?: CommandRule[];
   };
   files: FilesConfig;
 }

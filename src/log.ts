@@ -1,10 +1,8 @@
-import { redactAuditText } from './audit/redact.js';
+import { isSensitiveAuditKey, REDACTED, redactAuditText } from './audit/redact.js';
 import type { LogLevel, Logger } from './types.js';
 
 const LEVEL_RANK: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
-const SECRET_KEY_RE = /password|passwd|secret|token|authorization|api[-_]?key|private[-_]?key/i;
-const REDACTED = '[REDACTED]';
 const STACK_MAX_BYTES = 4096;
 
 function parseLevel(raw: string | undefined): LogLevel {
@@ -45,7 +43,7 @@ export function redact(value: unknown, keys: readonly string[] = []): unknown {
       }
       const out: Record<string, unknown> = {};
       for (const [k, child] of Object.entries(v)) {
-        if (SECRET_KEY_RE.test(k) || extra.has(k.toLowerCase())) {
+        if (isSensitiveAuditKey(k) || extra.has(k.toLowerCase())) {
           out[k] = REDACTED;
         } else {
           out[k] = walk(child);

@@ -58,7 +58,14 @@ export function policyError(e: UsageError | ConfigError): ToolError {
   }
   // reason 只用于挑选 REASON_HINTS；Policy 类别由 phase=config 决定
   const base = toUserError({ phase: 'config', reason: code });
-  return { ...base, code, message: e.message };
+  const error: ToolError = { ...base, code, message: e.message };
+  // 保留策略细节（action/code/ruleId/surface/reason），与 session_send 的约定一致。
+  const details =
+    e instanceof UsageError
+      ? (e as UsageError & { details?: Record<string, unknown> }).details
+      : undefined;
+  if (details !== undefined) error.details = details;
+  return error;
 }
 
 /** 任意异常 -> ToolError。Policy 类异常保留消息；其余记录日志并返回 Internal。 */

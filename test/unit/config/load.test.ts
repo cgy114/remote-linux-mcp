@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig, loadConfigLazy } from '../../../src/config/load.js';
 import { resolvePaths } from '../../../src/config/paths.js';
@@ -138,7 +139,21 @@ hosts:
       defaultCwd: '/home/x',
       timeouts: { connectMs: 5000, commandMs: 30000, checkMs: 8000 },
       maxOutputBytes: 65536,
-      sudo: { mode: 'passwordless', allow: ['systemctl status *'], deny: [] },
+      sudo: {
+        mode: 'passwordless',
+        allow: ['systemctl status *'],
+        deny: [],
+        allowRules: [
+          {
+            raw: 'systemctl status *',
+            kind: 'prefix',
+            source: 'sudo',
+            id: 'sudo:allow:0',
+            prefix: 'systemctl status *',
+          },
+        ],
+        denyRules: [],
+      },
       files: {
         localRoots: [],
         remoteDeny: [],
@@ -269,6 +284,39 @@ hosts:
     await write(VALID);
     const cfg = await loadConfig(paths);
     expect(cfg.security.knownHostsFile).toBeUndefined();
+  });
+
+  it('rejects an invalid defaults.sudo rule as a schema error', async () => {
+    await write(`version: 1
+defaults:
+  sudo:
+    allow: ['re:[']
+hosts:
+  web1:
+    host: 10.0.0.5
+    user: deploy
+`);
+    const err = await expectConfigError(loadConfig(paths), 'schema');
+    expect(JSON.stringify(err.issues)).toContain('invalid regex');
+  });
+
+  it('loads the configuration example from README.md', async () => {
+    const readme = fileURLToPath(new URL('../../../README.md', import.meta.url));
+    const text = await fs.readFile(readme, 'utf8');
+    const block = /```yaml\r?\n([\s\S]*?)```/.exec(text);
+    expect(block).not.toBeNull();
+    await write(block?.[1] ?? '');
+
+    const cfg = await loadConfig(paths);
+    expect(cfg.hosts.web1).toMatchObject({ host: '10.0.0.5', user: 'deploy' });
+    // confirm 必须是标量规则（曾经写成 `re: '...'` 映射导致示例无法加载）。
+    expect(cfg.security.commandPolicy.confirm).toHaveLength(1);
+    expect(cfg.security.commandPolicy.confirm[0]?.regex?.test('systemctl reboot')).toBe(true);
+    expect(cfg.security.commandPolicy.allow.map((rule) => rule.prefix)).toEqual(['ls', 'cat']);
+    // Defaults 保留原始规则文本；预编译结果在 allowRules/denyRules。
+    expect(cfg.defaults.sudo.allow).toEqual(['prefix:systemctl']);
+    expect(cfg.defaults.sudo.deny).toEqual(['prefix:rm']);
+    expect(cfg.defaults.sudo.allowRules?.[0]?.prefix).toBe('systemctl');
   });
 
   it('reports duplicate YAML keys as duplicate_key', async () => {
