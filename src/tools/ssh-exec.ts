@@ -1,7 +1,9 @@
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { appendAudit, auditFilePath, buildExecAuditRecord } from '../audit/audit.js';
+import { appendAuditRecord, buildExecAuditRecord, sha256Hex } from '../audit/audit.js';
+import { UsageError } from '../errors/classes.js';
 import { classifyExit, stderrSignatures, toUserError } from '../errors/classify.js';
+import { evaluateCommandPolicy } from '../policy/command-policy.js';
 import { runSshOperation } from '../pipeline/operation.js';
 import { runSshCommand } from '../pipeline/run-command.js';
 import type { ResolvedTarget } from '../pipeline/target.js';
@@ -91,6 +93,25 @@ export async function sshExec(input: SshExecInput, ctx: ToolContext): Promise<Ca
     ctx,
     toolName: 'ssh_exec',
     prepare: (target) => {
+      // 策略求值必须在构建命令/获取租约之前；deny/confirm 一律视为拒绝。
+      const decision = evaluateCommandPolicy({
+        command: input.command,
+        policy: target.config.security.commandPolicy,
+        surface: 'ssh_exec',
+        envKeys: Object.keys(input.env ?? {}),
+      });
+      if (decision.action !== 'allow') {
+        const error = new UsageError(decision.reason, { code: decision.code });
+        (error as UsageError & { details?: Record<string, unknown> }).details = {
+          action: decision.action,
+          code: decision.code,
+          ruleId: decision.ruleId,
+          surface: decision.surface,
+          reason: decision.reason,
+        };
+        throw error;
+      }
+
       const plan = buildExecCommand({
         command: input.command,
         cwd: input.cwd ?? target.host.cwd,
@@ -121,7 +142,7 @@ export async function sshExec(input: SshExecInput, ctx: ToolContext): Promise<Ca
     classifyFailure: (run) => execFailure(run, ctx.log),
     // 审计只记录退出事实与命令摘要；appendAudit 永不 reject，失败不影响结果。
     audit: async ({ target, plan, produced: run, lease, failure }) => {
-      await appendAudit(
+      await appendAuditRecord(
         buildExecAuditRecord({
           alias: target.host.alias,
           destination: target.destination,
@@ -136,7 +157,11 @@ export async function sshExec(input: SshExecInput, ctx: ToolContext): Promise<Ca
             ? { failure: { code: failure.code, kind: failure.kind, message: failure.message } }
             : {}),
         }),
-        { file: auditFilePath(ctx.paths.configDir), log: ctx.log },
+        {
+          configDir: ctx.paths.configDir,
+          log: ctx.log,
+          audit: target.config.security.audit,
+        },
       );
     },
     format: ({ target, plan, produced: run, lease, failure }) =>
@@ -149,6 +174,37 @@ export async function sshExec(input: SshExecInput, ctx: ToolContext): Promise<Ca
         queueMs: lease.queueMs,
         ...(failure !== undefined ? { failure } : {}),
       }),
+    // prepare 阶段的策略拒绝写一条 denied 审计；此时尚未 spawn/获取租约。
+    auditDenied: async ({ phase, error, target }) => {
+      if (
+        phase !== 'prepare' ||
+        (error.kind !== 'Policy' && error.kind !== 'SudoPrompt')
+      ) {
+        return;
+      }
+      const commandSha256 = sha256Hex(input.command);
+      const commandBytes = Buffer.byteLength(input.command, 'utf8');
+      const record = buildExecAuditRecord({
+        ...(target !== undefined
+          ? { alias: target.host.alias, destination: target.destination }
+          : {}),
+        commandSha256,
+        commandBytes,
+        cwd: input.cwd ?? target?.host.cwd,
+        envKeys: Object.keys(input.env ?? {}).sort(),
+        stdinBytes:
+          input.stdin !== undefined ? Buffer.byteLength(input.stdin, 'utf8') : 0,
+        failure: { code: error.code, kind: error.kind },
+      });
+      await appendAuditRecord(
+        { ...record, outcome: 'denied', denied: true },
+        {
+          configDir: ctx.paths.configDir,
+          log: ctx.log,
+          ...(target !== undefined ? { audit: target.config.security.audit } : {}),
+        },
+      );
+    },
   });
 }
 
@@ -187,6 +243,10 @@ export interface FormatExecResultInput {
   run: RunResult;
   queueMs: number;
   failure?: ToolError;
+  /** 结果归属的工具名；默认 ssh_exec。 */
+  tool?: 'ssh_exec' | 'ssh_sudo';
+  /** 额外 structuredContent 字段（ssh_sudo 用于 sudo_mode）。 */
+  extraStructured?: Record<string, unknown>;
 }
 
 /** 去掉恰好一个行尾换行，避免文本分段出现多余空行。 */
@@ -223,7 +283,8 @@ export function formatExecResult(input: FormatExecResultInput): CallToolResult {
   }
 
   const structured: Record<string, unknown> = {
-    tool: 'ssh_exec',
+    tool: input.tool ?? 'ssh_exec',
+    ...(input.extraStructured ?? {}),
     host: input.alias,
     destination: input.destination,
     exit_code: run.exitCode,

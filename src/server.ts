@@ -24,6 +24,7 @@ import { sessionStart, sessionStartInput } from './tools/session-start.js';
 import { sshDownload, sshDownloadInput } from './tools/ssh-download.js';
 import { sshExec, sshExecInput } from './tools/ssh-exec.js';
 import { sshReadFile, sshReadFileInput } from './tools/ssh-read-file.js';
+import { SSH_SUDO_ANNOTATIONS, sshSudo, sshSudoInput } from './tools/ssh-sudo.js';
 import { sshUpload, sshUploadInput } from './tools/ssh-upload.js';
 import { sshWriteFile, sshWriteFileInput } from './tools/ssh-write-file.js';
 import { READ_FILE_ANNOTATIONS, TRANSFER_ANNOTATIONS } from './tools/transfer-common.js';
@@ -40,7 +41,12 @@ const INSTRUCTIONS =
   '本地路径受 files.local_roots 限制，远端路径受读/写 deny 限制；覆盖默认关闭，需要时显式传 overwrite=true。' +
   '持久会话工具：session_start 建立常驻 shell（仍需信任主机），session_send 在该 shell 中依次执行命令，' +
   'session_close 优雅关闭，session_list 查看当前会话。会话按 FIFO 串行执行，空闲超时后自动关闭；' +
-  '会话内环境变量与 cwd 只属于该 shell，不会影响其他工具调用。';
+  '会话内环境变量与 cwd 只属于该 shell，不会影响其他工具调用。' +
+  '会话关闭不会杀掉未 kill 的后台任务；需要时先在会话内 kill，或用 ssh_exec 的 timeout 约束一次性命令。' +
+  'ssh_sudo 在已信任主机上通过 sudo 执行命令；sudo.mode=password 时必须先运行 ' +
+  '`remote-mcp credential set <ref>` 把密码存入系统凭据库（密码只经 stdin 传给 sudo，不进入 argv/env/审计）。' +
+  '命令策略由 security.command_policy 控制（mode=off 保持旧行为）；审计写入配置目录的 audit.jsonl，' +
+  '默认 16MiB 轮转、保留 90 天，条目会先脱敏再落盘。';
 
 /** 创建一个未注册工具的 McpServer 实例。 */
 export function createMcpServer(_ctx: ToolContext): McpServer {
@@ -154,6 +160,23 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     ctx,
   );
 
+  registerTool(
+    server,
+    {
+      name: 'ssh_sudo',
+      title: '以 sudo 执行远程命令',
+      description:
+        '在已信任的远程主机上通过 sudo 执行一条命令。命令与 sudo 规则分别由 security.command_policy 与 ' +
+        'defaults.sudo 约束；read_only/off/deny 会在 spawn 前拒绝。' +
+        'sudo.mode=passwordless 使用 `sudo -n`；sudo.mode=password 从系统凭据库读取密码并通过 stdin 传给 sudo，' +
+        '因此该模式不支持用户 stdin。密码错误或需要 TTY 返回 SudoPrompt。',
+      inputSchema: sshSudoInput,
+      annotations: SSH_SUDO_ANNOTATIONS,
+      handler: (input, c) => sshSudo(input, c),
+    },
+    ctx,
+  );
+
   registerSessionTools(server, ctx);
 }
 
@@ -196,7 +219,8 @@ export function registerSessionTools(server: McpServer, ctx: ToolContext): void 
       title: '关闭会话',
       description:
         '优雅关闭持久会话（发送 Q 并关闭 stdin，宽限期后强杀进程树），返回退出码/信号等事实。' +
-        '关闭是幂等的；未知或已移除的会话返回 unknown_session。',
+        '关闭是幂等的；未知或已移除的会话返回 unknown_session。' +
+        '注意：关闭会话不会杀掉未 kill 的后台任务；需要时先在会话内 kill，或用 ssh_exec 的 timeout 约束一次性命令。',
       inputSchema: sessionCloseInput,
       annotations: SESSION_CLOSE_ANNOTATIONS,
       handler: (input, c) => sessionClose(input, c),

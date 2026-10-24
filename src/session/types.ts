@@ -100,7 +100,11 @@ export interface CloseFacts {
   /** 是否需要本地强杀进程树。 */
   killed: boolean;
   duration_ms: number;
-  /** 关闭原因：explicit / idle_timeout / command_timeout / protocol_error / transport_exit / shutdown / trust_revoked。 */
+  /**
+   * 关闭原因：explicit / idle_timeout / command_timeout / protocol_error /
+   * transport_exit / transport_closed / shutdown / trust_revoked /
+   * alias_retargeted / stdin_* / SIGINT|SIGTERM|SIGHUP。
+   */
   reason: string;
 }
 

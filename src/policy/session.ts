@@ -117,6 +117,8 @@ export function validateSessionSendInput(input: SessionSendInput): void {
  *   不会抢走协议行；
  * - eval 前后都 `set +e`：用户命令里的 errexit 不会终止会话循环，也不会
  *   让非零退出码跳过 E 帧；
+ * - bootstrap 首行、循环体与每次写帧前都 `builtin set +x`：用户命令开启
+ *   xtrace 后，协议帧与控制变量不会进入捕获输出（只关闭，不恢复）；
  * - eval 后立即 `exec 1>&3 2>&3` 重新锚定 fd1/fd2，用户命令的
  *   `exec >file` 只影响该条命令，不会吞掉后续输出/帧；
  * - 收到 `Q` 时跳出循环，最终把 fd1/fd2 恢复到 channel。
@@ -143,6 +145,8 @@ export function buildSessionBootstrap(input: SessionBootstrapInput): string[] {
   }
 
   return [
+    // 先关闭 xtrace，避免后续帧/变量因用户环境里的 `set -x` 泄露到输出。
+    'builtin set +x',
     'exec 3>&1; exec 2>&1',
     ...envLines,
     `builtin cd -- ${cwdExpr} || exit 125`,
@@ -150,11 +154,15 @@ export function buildSessionBootstrap(input: SessionBootstrapInput): string[] {
     `RMCP_NONCE='${nonce}'`,
     `builtin printf '\\036RMCP%s:RDY\\037' "$RMCP_NONCE" >&3`,
     'while IFS= read -r RMCP_LINE; do',
+    // 上一轮用户命令可能开启了 xtrace；循环体第一行立即关闭，避免
+    // RMCP_LINE/PAYLOAD 与协议帧被打印到捕获输出。
+    '  builtin set +x',
     '  RMCP_SEQ=${RMCP_LINE%% *}',
     '  RMCP_PAYLOAD=${RMCP_LINE#* }',
     '  case "$RMCP_SEQ" in',
     '    Q) break ;;',
     '  esac',
+    '  builtin set +x',
     `  builtin printf '\\036RMCP%s:B:%s\\037' "$RMCP_NONCE" "$RMCP_SEQ" >&3`,
     // 每条命令都从非 errexit 状态开始：用户上一条命令里的 `set -e` 不应让
     // 下一条命令的非零退出码直接终止会话循环。
@@ -163,8 +171,9 @@ export function buildSessionBootstrap(input: SessionBootstrapInput): string[] {
     '  RMCP_RC=$?',
     // 用户命令可能重定向了 fd1/fd2；先恢复协议通道，再写 E 帧与后续输出。
     '  exec 1>&3 2>&3',
-    // 命令本身可能刚开启 errexit，写帧前再关一次。
+    // 命令本身可能刚开启 errexit/xtrace，写帧前再关一次。
     '  set +e',
+    '  builtin set +x',
     `  builtin printf '\\036RMCP%s:E:%s:%s\\037' "$RMCP_NONCE" "$RMCP_SEQ" "$RMCP_RC" >&3`,
     'done',
     'exec 1>&3 2>&3',

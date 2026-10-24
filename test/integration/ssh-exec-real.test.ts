@@ -51,7 +51,8 @@ describe.skipIf(!E2E)('integration: ssh_exec on real host (orangepi)', () => {
   }, TIMEOUT_MS);
 
   it('maps a remote exit code of 7 to exit_code 7 without isError', async () => {
-    const result = await sshExec({ host: ALIAS, command: "sh -c 'exit 7'" }, ctx);
+    // 直接 exit；不要用 `sh -c`（内置 hard 规则会拒绝 shell 解释器）。
+    const result = await sshExec({ host: ALIAS, command: 'exit 7' }, ctx);
     const s = structuredOf(result);
     console.log('[ssh_exec:exit7] ' + JSON.stringify(s));
     expect(s.exit_code).toBe(7);

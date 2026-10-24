@@ -1,10 +1,12 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/server';
-import { main, parseCliArgs } from '../../src/cli.js';
+import { main, parseCliArgs, runCredentialCommand } from '../../src/cli.js';
 import { EXIT } from '../../src/constants.js';
+import { CredentialError, MemoryCredentialProvider } from '../../src/credentials/index.js';
 import { createMcpServer, registerTools } from '../../src/server.js';
 import { UsageError } from '../../src/errors/classes.js';
 import { VERSION } from '../../src/version.js';
@@ -81,6 +83,47 @@ describe('parseCliArgs', () => {
     expect(usageMessage(['--rotate'])).toMatch(/only to the trust/);
     expect(usageMessage(['--fingerprint', 'SHA256:x'])).toMatch(/only to the trust/);
   });
+
+  it('parses credential set/status/delete', () => {
+    expect(parseCliArgs(['credential', 'set', 'sudo.web1', '--stdin'])).toEqual({
+      kind: 'credential',
+      action: 'set',
+      ref: 'sudo.web1',
+      stdin: true,
+    });
+    expect(parseCliArgs(['credential', 'status', 'sudo.web1'])).toEqual({
+      kind: 'credential',
+      action: 'status',
+      ref: 'sudo.web1',
+      stdin: false,
+    });
+    expect(parseCliArgs(['credential', 'delete', 'sudo.web1'])).toEqual({
+      kind: 'credential',
+      action: 'delete',
+      ref: 'sudo.web1',
+      stdin: false,
+    });
+  });
+
+  it('rejects malformed credential commands', () => {
+    expect(usageMessage(['credential'])).toMatch(/subcommand/);
+    expect(usageMessage(['credential', 'frobnicate', 'ref'])).toMatch(/subcommand/);
+    expect(usageMessage(['credential', 'set'])).toMatch(/requires a name/);
+    expect(usageMessage(['credential', 'set', 'a', 'b'])).toMatch(/extra arguments/);
+    expect(usageMessage(['credential', 'status', 'ref', '--stdin'])).toMatch(
+      /--stdin applies only to credential set/,
+    );
+    expect(usageMessage(['credential', 'set', 'ref', '--rotate'])).toMatch(/only to the trust/);
+    expect(usageMessage(['trust', 'web1', '--stdin'])).toMatch(
+      /--stdin applies only to credential set/,
+    );
+  });
+
+  it('does not accept --password (secret must come from stdin)', () => {
+    expect(usageMessage(['credential', 'set', 'ref', '--password', 'hunter2'])).toMatch(
+      /password/,
+    );
+  });
 });
 
 describe('main', () => {
@@ -155,6 +198,198 @@ describe('main', () => {
     const missing = path.join(dir, 'does-not-exist.yaml');
     await expect(main(['trust', 'web', '--config', missing])).resolves.toBe(EXIT.config);
     expect(err).toContain('config file not found');
+  });
+});
+
+describe('runCredentialCommand', () => {
+  const log: Logger = {
+    debug: () => undefined,
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    child: () => log,
+  };
+
+  interface Capture {
+    stream: NodeJS.WritableStream;
+    text: () => string;
+  }
+
+  function capture(): Capture {
+    let text = '';
+    return {
+      stream: {
+        write(chunk: string | Uint8Array): boolean {
+          text += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+          return true;
+        },
+      } as unknown as NodeJS.WritableStream,
+      text: () => text,
+    };
+  }
+
+  function ttyStream(): NodeJS.ReadableStream {
+    const stream = new Readable({ read: () => undefined }) as Readable & { isTTY?: boolean };
+    stream.isTTY = true;
+    return stream;
+  }
+
+  const setCmd = (ref: string, stdin: boolean) =>
+    ({ kind: 'credential', action: 'set', ref, stdin }) as const;
+  const statusCmd = (ref: string) =>
+    ({ kind: 'credential', action: 'status', ref, stdin: false }) as const;
+  const deleteCmd = (ref: string) =>
+    ({ kind: 'credential', action: 'delete', ref, stdin: false }) as const;
+
+  it('set --stdin stores the line and prints only "stored"', async () => {
+    const provider = new MemoryCredentialProvider();
+    const out = capture();
+    const err = capture();
+
+    const code = await runCredentialCommand(setCmd('sudo.web1', true), log, {
+      provider,
+      stdin: Readable.from(['hunter2\n']),
+      stdout: out.stream,
+      stderr: err.stream,
+    });
+
+    expect(code).toBe(EXIT.ok);
+    expect(out.text()).toBe('stored\n');
+    expect(err.text()).toBe('');
+    await expect(provider.exists('sudo.web1')).resolves.toBe(true);
+    const secret = await provider.get('sudo.web1');
+    expect(secret.toString()).toBe('hunter2');
+    secret.wipe();
+  });
+
+  it('set reads a piped stdin without --stdin', async () => {
+    const provider = new MemoryCredentialProvider();
+    const out = capture();
+    const code = await runCredentialCommand(setCmd('ref', false), log, {
+      provider,
+      stdin: Readable.from(['piped-secret\r\n']),
+      stdout: out.stream,
+      stderr: capture().stream,
+    });
+    expect(code).toBe(EXIT.ok);
+    const secret = await provider.get('ref');
+    expect(secret.toString()).toBe('piped-secret');
+    secret.wipe();
+  });
+
+  it('set refuses a TTY without --stdin', async () => {
+    const provider = new MemoryCredentialProvider();
+    const err = capture();
+    const code = await runCredentialCommand(setCmd('ref', false), log, {
+      provider,
+      stdin: ttyStream(),
+      stdout: capture().stream,
+      stderr: err.stream,
+    });
+    expect(code).toBe(EXIT.usage);
+    expect(err.text()).toMatch(/--stdin/);
+    await expect(provider.exists('ref')).resolves.toBe(false);
+  });
+
+  it('set rejects an empty line and never echoes it', async () => {
+    const provider = new MemoryCredentialProvider();
+    const out = capture();
+    const err = capture();
+    const code = await runCredentialCommand(setCmd('ref', true), log, {
+      provider,
+      stdin: Readable.from(['\n']),
+      stdout: out.stream,
+      stderr: err.stream,
+    });
+    expect(code).toBe(EXIT.config);
+    expect(out.text()).toBe('');
+    expect(err.text()).toMatch(/must not be empty/);
+  });
+
+  it('set rejects an invalid credential name', async () => {
+    const provider = new MemoryCredentialProvider();
+    const err = capture();
+    const code = await runCredentialCommand(setCmd('bad name', true), log, {
+      provider,
+      stdin: Readable.from(['hunter2\n']),
+      stdout: capture().stream,
+      stderr: err.stream,
+    });
+    expect(code).toBe(EXIT.config);
+    expect(err.text()).toMatch(/credential name/);
+    expect(err.text()).not.toContain('hunter2');
+  });
+
+  it('status reports present/not found without exposing the secret', async () => {
+    const provider = new MemoryCredentialProvider({ ref: 'hunter2' });
+    const present = capture();
+    expect(
+      await runCredentialCommand(statusCmd('ref'), log, {
+        provider,
+        stdout: present.stream,
+        stderr: capture().stream,
+      }),
+    ).toBe(EXIT.ok);
+    expect(present.text()).toBe('present\n');
+
+    const missing = capture();
+    expect(
+      await runCredentialCommand(statusCmd('absent'), log, {
+        provider,
+        stdout: missing.stream,
+        stderr: capture().stream,
+      }),
+    ).toBe(EXIT.ok);
+    expect(missing.text()).toBe('not found\n');
+    expect(present.text()).not.toContain('hunter2');
+  });
+
+  it('delete removes a credential and reports the outcome', async () => {
+    const provider = new MemoryCredentialProvider({ ref: 'hunter2' });
+    const out = capture();
+    expect(
+      await runCredentialCommand(deleteCmd('ref'), log, {
+        provider,
+        stdout: out.stream,
+        stderr: capture().stream,
+      }),
+    ).toBe(EXIT.ok);
+    expect(out.text()).toBe('deleted\n');
+
+    const again = capture();
+    await runCredentialCommand(deleteCmd('ref'), log, {
+      provider,
+      stdout: again.stream,
+      stderr: capture().stream,
+    });
+    expect(again.text()).toBe('not found\n');
+  });
+
+  it('maps an unavailable backend to EXIT.internal without leaking details', async () => {
+    const provider = {
+      id: 'broken',
+      async get(): Promise<never> {
+        throw new CredentialError('credential_unavailable', 'store offline');
+      },
+      async set(): Promise<void> {
+        throw new CredentialError('credential_unavailable', 'store offline');
+      },
+      async delete(): Promise<boolean> {
+        throw new CredentialError('credential_unavailable', 'store offline');
+      },
+      async exists(): Promise<boolean> {
+        throw new CredentialError('credential_unavailable', 'store offline');
+      },
+    };
+    const err = capture();
+    const code = await runCredentialCommand(statusCmd('ref'), log, {
+      provider,
+      stdout: capture().stream,
+      stderr: err.stream,
+    });
+    expect(code).toBe(EXIT.internal);
+    expect(err.text()).toMatch(/unavailable/);
+    expect(err.text()).not.toContain('store offline');
   });
 });
 

@@ -12,7 +12,18 @@ import type {
   TransportEvent,
 } from '../../src/session/transport.js';
 import type { CloseFacts } from '../../src/session/types.js';
-import type { Logger } from '../../src/types.js';
+import type { EffectiveHost, Logger } from '../../src/types.js';
+
+const HOST: EffectiveHost = {
+  alias: 'web1',
+  host: 'example.test',
+  user: 'u',
+  port: 22,
+  cwd: '~',
+  timeouts: { connectMs: 1000, commandMs: 1000, checkMs: 1000 },
+  maxOutputBytes: 65_536,
+  sudo: { mode: 'off', allow: [], deny: [] },
+};
 
 function makeLogger(): Logger {
   const logger: Logger = {
@@ -93,6 +104,7 @@ function makeSession(
     target: {
       alias: 'web1',
       destination: 'u@example.test:22',
+      host: HOST,
       defaultTimeoutMs: 1000,
       defaultMaxOutputBytes: 65_536,
     },
@@ -144,6 +156,24 @@ describe('createSession FIFO and framing', () => {
     expect(snapshot.output_bytes).toBe(8);
     expect(snapshot.queue_depth).toBe(0);
     expect(snapshot.state).toBe('ready');
+
+    await session.close();
+  });
+
+  it('redacts the handshake nonce from captured output', async () => {
+    const nonce = '0123456789abcdef0123456789abcdef';
+    const { session, transport } = makeSession({ nonce });
+    const pending = session.send({ command: 'echo leak' });
+    await until(() => transport.written.length === 1);
+
+    transport.emit({ type: 'frame', frame: { type: 'B', seq: 1 } });
+    transport.emit({ type: 'data', buf: Buffer.from(`before ${nonce} after\n`) });
+    transport.emit({ type: 'frame', frame: { type: 'E', seq: 1, rc: 0 } });
+
+    const result = await pending;
+    if (result.outcome.status !== 'ok') throw new Error('unreachable');
+    expect(result.outcome.output.text).toBe('before <nonce> after\n');
+    expect(result.outcome.output.text).not.toContain(nonce);
 
     await session.close();
   });

@@ -1,7 +1,15 @@
 import { z } from 'zod';
 import { ConfigError } from '../errors/classes.js';
+import {
+  compileCommandPolicy,
+  isForbiddenProgram,
+  parseRule,
+  rulePrefixTokens,
+} from '../policy/command-rules.js';
 import { assertRemoteCwd } from '../policy/remote-command.js';
-import type { Defaults, FilesConfig } from '../types.js';
+import type { AuditConfig, CommandPolicy, Defaults, FilesConfig } from '../types.js';
+
+export type { AuditConfig } from '../types.js';
 
 /** host alias：小写字母数字开头，后续允许 . _ -，最长 64。 */
 const ALIAS_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -43,12 +51,94 @@ const timeoutsSchema = z.strictObject({
   check_ms: positiveIntSchema.optional(),
 });
 
+/** credential 名：字母数字开头，后续允许 . _ : -，最长 128。 */
+const CREDENTIAL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
 const sudoSchema = z.strictObject({
   mode: z.enum(['off', 'passwordless', 'password']).optional(),
-  credential: z.string().optional(),
+  credential: z
+    .string()
+    .regex(CREDENTIAL_RE, {
+      message: 'credential must match ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$',
+    })
+    .optional(),
   allow: z.array(z.string()).optional(),
   deny: z.array(z.string()).optional(),
 });
+
+/** 单条命令规则：语法在解析期校验（re: 可编译、prefix: 非空）。 */
+const commandRuleSpecSchema = z.string().min(1).superRefine((value, ctx) => {
+  try {
+    parseRule(value, 'config', 'validate');
+  } catch (err) {
+    ctx.addIssue({
+      code: 'custom',
+      message: err instanceof Error ? err.message : 'invalid command rule',
+    });
+  }
+});
+
+/** security.command_policy 严格对象。read_only 下 allow 只允许安全的前缀规则。 */
+export const commandPolicySchema = z
+  .strictObject({
+    mode: z.enum(['off', 'enforce', 'read_only']).optional(),
+    use_default_deny: z.boolean().optional(),
+    allow: z.array(commandRuleSpecSchema).optional(),
+    confirm: z.array(commandRuleSpecSchema).optional(),
+    deny: z.array(commandRuleSpecSchema).optional(),
+  })
+  .superRefine((policy, ctx) => {
+    if (policy.mode !== 'read_only') return;
+    (policy.allow ?? []).forEach((spec, index) => {
+      let rule;
+      try {
+        rule = parseRule(spec, 'config', `allow[${index}]`);
+      } catch {
+        return; // 语法错误已由 item schema 报告
+      }
+      if (rule.kind !== 'prefix') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['allow', index],
+          message: 'read_only mode only allows prefix: rules in allow',
+        });
+        return;
+      }
+      const first = rulePrefixTokens(rule)[0];
+      if (first !== undefined && isForbiddenProgram(first)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['allow', index],
+          message: `read_only allow must not start with an interpreter/wrapper/privilege program (${first})`,
+        });
+      }
+    });
+  });
+
+/** security.audit 严格对象（P5 审计配置；本批只做校验与默认值）。 */
+export const auditSchema = z.strictObject({
+  max_bytes: z
+    .number()
+    .int()
+    .min(1024 * 1024, { message: 'audit.max_bytes must be at least 1 MiB' })
+    .optional(),
+  retain_days: z.number().int().min(1).max(3650).optional(),
+  date_rotate: z.boolean().optional(),
+});
+
+const DEFAULT_AUDIT_MAX_BYTES = 16 * 1024 * 1024;
+const DEFAULT_AUDIT_RETAIN_DAYS = 90;
+const DEFAULT_AUDIT_DATE_ROTATE = true;
+
+/** 展开 security.audit 的默认值：16 MiB / 90 天 / 按日期轮转。 */
+export function auditFor(raw: RawConfig): AuditConfig {
+  const audit = raw.security?.audit;
+  return {
+    maxBytes: audit?.max_bytes ?? DEFAULT_AUDIT_MAX_BYTES,
+    retainDays: audit?.retain_days ?? DEFAULT_AUDIT_RETAIN_DAYS,
+    dateRotate: audit?.date_rotate ?? DEFAULT_AUDIT_DATE_ROTATE,
+  };
+}
 
 const defaultsSchema = z.strictObject({
   port: portSchema.optional(),
@@ -62,6 +152,8 @@ const defaultsSchema = z.strictObject({
 const securitySchema = z.strictObject({
   host_key_policy: z.literal('pinned').optional(),
   known_hosts_file: z.string().min(1).optional(),
+  command_policy: commandPolicySchema.optional(),
+  audit: auditSchema.optional(),
 });
 
 /** P3 文件策略的默认门限。 */
@@ -167,6 +259,14 @@ export function filesFor(
   };
 }
 
+/**
+ * 展开 security.command_policy：缺省为 enforce + use_default_deny=true，
+ * 并合并内置危险规则表。旧配置（无该段）得到同一默认策略。
+ */
+export function commandPolicyFor(raw: RawConfig): CommandPolicy {
+  return compileCommandPolicy(raw.security?.command_policy ?? {});
+}
+
 /** 展开 defaults 段的全部默认值（port 22 / default_cwd "~" / 超时 5000,15000,8000 / 输出 1MiB / sudo off / files 默认）。 */
 export function defaultsFor(raw: RawConfig, opts?: DefaultsForOptions): Defaults {
   const d = raw.defaults;
@@ -178,6 +278,12 @@ export function defaultsFor(raw: RawConfig, opts?: DefaultsForOptions): Defaults
     deny: [...(s?.deny ?? [])],
   };
   if (s?.credential !== undefined) sudo.credential = s.credential;
+  if (sudo.mode === 'password' && sudo.credential === undefined) {
+    throw new ConfigError(
+      'schema',
+      'defaults.sudo.credential is required when defaults.sudo.mode is "password"',
+    );
+  }
 
   const defaultHost = d?.default_host;
   if (defaultHost !== undefined && !Object.prototype.hasOwnProperty.call(raw.hosts, defaultHost)) {

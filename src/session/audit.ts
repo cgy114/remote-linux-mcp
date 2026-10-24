@@ -187,9 +187,12 @@ export function buildSessionSendAudit(input: SessionSendAuditInput): SessionSend
   return record;
 }
 
+const CLOSED_SIGNALS: ReadonlySet<string> = new Set(['SIGINT', 'SIGTERM', 'SIGHUP']);
+
 /**
  * close 的 outcome：显式关闭为 ok；超时/协议/传输错误沿用 send 的词汇；
- * idle/shutdown 是正常的生命周期结束，记为 closed。
+ * idle/shutdown、传输关闭、stdin 结束与进程信号都是正常的生命周期结束，
+ * 记为 closed（原始 reason 保留在记录里）。
  */
 export function deriveSessionCloseOutcome(input: SessionCloseAuditInput): SessionAuditOutcome {
   if (input.failure !== undefined) {
@@ -197,10 +200,18 @@ export function deriveSessionCloseOutcome(input: SessionCloseAuditInput): Sessio
     if (input.failure.kind === 'Timeout') return 'timeout';
     return 'error';
   }
-  switch (input.reason) {
-    case 'idle_timeout':
-    case 'shutdown':
-      return 'closed';
+  const reason = input.reason;
+  if (
+    reason !== undefined &&
+    (reason === 'idle_timeout' ||
+      reason === 'shutdown' ||
+      reason === 'transport_closed' ||
+      reason.startsWith('stdin_') ||
+      CLOSED_SIGNALS.has(reason))
+  ) {
+    return 'closed';
+  }
+  switch (reason) {
     case 'command_timeout':
       return 'timeout';
     case 'protocol_error':
@@ -208,6 +219,7 @@ export function deriveSessionCloseOutcome(input: SessionCloseAuditInput): Sessio
     case 'transport_error':
       return 'error';
     case 'trust_revoked':
+    case 'alias_retargeted':
       return 'denied';
     default:
       return 'ok';

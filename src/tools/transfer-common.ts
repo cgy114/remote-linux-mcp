@@ -1,4 +1,4 @@
-import { appendAudit, auditFilePath } from '../audit/audit.js';
+import { appendAuditRecord } from '../audit/audit.js';
 import {
   buildTransferAuditRecord,
   type TransferDirection,
@@ -96,9 +96,13 @@ export async function appendTransferAudit(args: TransferAuditArgs): Promise<void
       ...(facts?.verified !== undefined ? { verified: facts.verified } : {}),
     });
     if (args.denied === true) record.outcome = 'denied';
-    await appendAudit(
+    await appendAuditRecord(
       { ...record, queue_ms: args.denied === true ? 0 : args.queueMs ?? 0 },
-      { file: auditFilePath(args.ctx.paths.configDir), log: args.ctx.log },
+      {
+        configDir: args.ctx.paths.configDir,
+        log: args.ctx.log,
+        ...(args.target !== undefined ? { audit: args.target.config.security.audit } : {}),
+      },
     );
   } catch (err) {
     try {

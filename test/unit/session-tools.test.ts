@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { UsageError } from '../../src/errors/classes.js';
+import { compileCommandPolicy } from '../../src/policy/command-rules.js';
 import { createSessionRegistry, type SessionRegistry } from '../../src/session/registry.js';
 import type { Session } from '../../src/session/session.js';
 import { SessionStartError } from '../../src/session/transport.js';
@@ -22,7 +23,13 @@ import { sessionList, sessionListInput } from '../../src/tools/session-list.js';
 import { sessionSend, sessionSendInput } from '../../src/tools/session-send.js';
 import { sessionStart, sessionStartInput } from '../../src/tools/session-start.js';
 import type { ToolContext } from '../../src/tools/common.js';
-import type { Logger, MCPPaths, RemoteConfig } from '../../src/types.js';
+import type {
+  CommandPolicy,
+  EffectiveHost,
+  Logger,
+  MCPPaths,
+  RemoteConfig,
+} from '../../src/types.js';
 
 const CLOSE_FACTS: CloseFacts = {
   exit_code: 0,
@@ -56,7 +63,10 @@ function makeFiles(): RemoteConfig['files'] {
   };
 }
 
-function makeConfig(dir: string): RemoteConfig {
+function makeConfig(
+  dir: string,
+  options: { commandPolicy?: CommandPolicy } = {},
+): RemoteConfig {
   return {
     version: 1,
     sourcePath: path.join(dir, 'config.yaml'),
@@ -69,7 +79,10 @@ function makeConfig(dir: string): RemoteConfig {
       sudo: { mode: 'off', allow: [], deny: [] },
       files: makeFiles(),
     },
-    security: { hostKeyPolicy: 'pinned' },
+    security: {
+      hostKeyPolicy: 'pinned',
+      commandPolicy: options.commandPolicy ?? compileCommandPolicy({ mode: 'off' }),
+    },
     hosts: { web1: { host: '127.0.0.1', user: 'tester' } },
     files: makeFiles(),
   };
@@ -101,12 +114,25 @@ function makeFakeSession(options: {
   id?: string;
   alias?: string;
   destination?: string;
+  host?: EffectiveHost;
   send?: Session['send'];
   close?: Session['close'];
   snapshot?: Partial<Snapshot>;
 } = {}): Session {
   const id = options.id ?? 'sess_fake';
-  const destination = options.destination ?? 'tester@example.test:22';
+  const alias = options.alias ?? 'web1';
+  const destination = options.destination ?? 'tester@127.0.0.1:22';
+  const host: EffectiveHost =
+    options.host ?? {
+      alias,
+      host: '127.0.0.1',
+      user: 'tester',
+      port: 22,
+      cwd: '~',
+      timeouts: { connectMs: 1000, commandMs: 1000, checkMs: 1000 },
+      maxOutputBytes: 1024 * 1024,
+      sudo: { mode: 'off', allow: [], deny: [] },
+    };
   const listeners: Array<(sessionId: string) => void> = [];
   const closeImpl: Session['close'] = options.close ?? (async () => CLOSE_FACTS);
   const snapshot: Snapshot = {
@@ -124,8 +150,9 @@ function makeFakeSession(options: {
   };
   return {
     id,
-    alias: options.alias ?? 'web1',
+    alias,
     destination,
+    host,
     cwd: '~',
     envKeys: ['FOO'],
     idleTimeoutMs: 900_000,
@@ -445,12 +472,28 @@ describe('session_send', () => {
 
     expect(result.isError).toBe(true);
     const structured = result.structuredContent as {
-      error: { kind: string; code: string; retryable: boolean; hint: string };
+      error: {
+        kind: string;
+        code: string;
+        retryable: boolean;
+        hint: string;
+        details?: Record<string, unknown>;
+      };
     };
     expect(structured.error).toMatchObject({ kind: 'Timeout', code: 'session_timeout' });
     expect(structured.error.retryable).toBe(false);
     expect(structured.error.hint).toContain('timeout_ms');
     expect(structured.error.hint).toContain('session_start');
+    expect(structured.error.details).toMatchObject({
+      session_id: 'sess_fake',
+      seq: 1,
+      output_bytes: 0,
+      truncated: false,
+      encoding: 'utf-8',
+      duration_ms: 30,
+      timed_out: true,
+    });
+    expect(structured.error.details).not.toHaveProperty('output');
 
     const audit = await readAudit(dir);
     expect(audit[0]).toMatchObject({
@@ -458,6 +501,58 @@ describe('session_send', () => {
       outcome: 'timeout',
       failureKind: 'Timeout',
       failureCode: 'session_timeout',
+    });
+  });
+
+  it('maps an error outcome to Internal with output metadata and frame_error', async () => {
+    const dir = await makeTempDir();
+    const registry = createSessionRegistry();
+    useSessionRegistry(registry);
+    const outcome: SendOutcome = {
+      status: 'error',
+      seq: 7,
+      output: { text: 'partial-output', encoding: 'utf-8', truncated: true, bytes: 123 },
+      duration_ms: 9,
+      error: 'bad_frame',
+      message: 'frame parser failed: bad_frame',
+    };
+    register(
+      registry,
+      makeFakeSession({ send: async () => ({ outcome, queueMs: 0, sessionQueueMs: 0 }) }),
+    );
+    await pinTrust(dir);
+
+    const result = await sessionSend(
+      { session_id: 'sess_fake', command: 'true' },
+      makeCtx(dir, makeConfig(dir)),
+    );
+
+    expect(result.isError).toBe(true);
+    const structured = result.structuredContent as {
+      error: { kind: string; code: string; details?: Record<string, unknown> };
+    };
+    expect(structured.error).toMatchObject({
+      kind: 'Internal',
+      code: 'session_protocol_error',
+    });
+    expect(structured.error.details).toMatchObject({
+      session_id: 'sess_fake',
+      seq: 7,
+      output_bytes: 123,
+      truncated: true,
+      encoding: 'utf-8',
+      duration_ms: 9,
+      timed_out: false,
+      frame_error: 'bad_frame',
+    });
+    expect(structured.error.details).not.toHaveProperty('output');
+    expect(JSON.stringify(structured.error.details)).not.toContain('partial-output');
+
+    const audit = await readAudit(dir);
+    expect(audit[0]).toMatchObject({
+      outcome: 'error',
+      failureKind: 'Internal',
+      failureCode: 'session_protocol_error',
     });
   });
 
@@ -560,6 +655,103 @@ describe('session_send', () => {
     expect(structured.error.kind).toBe('HostKey');
     expect(sendCalls).toBe(0);
     expect(closeReasons).toEqual(['trust_revoked']);
+    expect(registry.get('sess_fake')).toBeUndefined();
+    expect(await readAudit(dir)).toHaveLength(0);
+  });
+
+  it('denies read_only commands before trust/send and audits one denied record', async () => {
+    const dir = await makeTempDir();
+    const registry = createSessionRegistry();
+    useSessionRegistry(registry);
+    let sendCalls = 0;
+    register(
+      registry,
+      makeFakeSession({
+        send: async () => {
+          sendCalls += 1;
+          throw new Error('send must not be called for a denied command');
+        },
+      }),
+    );
+    const config = makeConfig(dir, {
+      commandPolicy: compileCommandPolicy({ mode: 'read_only', allow: ['prefix:ls'] }),
+    });
+
+    const result = await sessionSend(
+      { session_id: 'sess_fake', command: 'rm -rf build' },
+      makeCtx(dir, config),
+    );
+
+    expect(result.isError).toBe(true);
+    const structured = result.structuredContent as {
+      error: { kind: string; code: string };
+    };
+    expect(structured.error.kind).toBe('Policy');
+    expect(structured.error.code).toBe('policy_read_only');
+    expect(sendCalls).toBe(0);
+    expect(registry.get('sess_fake')).toBeDefined();
+
+    const audit = await readAudit(dir);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({
+      tool: 'session_send',
+      session_id: 'sess_fake',
+      outcome: 'denied',
+      failureKind: 'Policy',
+      failureCode: 'policy_read_only',
+      commandSha256: createHash('sha256').update('rm -rf build').digest('hex'),
+      commandBytes: 12,
+      queue_ms: 0,
+      session_queue_ms: 0,
+      outputBytes: 0,
+    });
+  });
+
+  it('rejects and closes the session when the alias was retargeted', async () => {
+    const dir = await makeTempDir();
+    const registry = createSessionRegistry();
+    useSessionRegistry(registry);
+    let sendCalls = 0;
+    const closeReasons: string[] = [];
+    register(
+      registry,
+      makeFakeSession({
+        destination: 'tester@127.0.0.2:22',
+        host: {
+          alias: 'web1',
+          host: '127.0.0.2',
+          user: 'tester',
+          port: 22,
+          cwd: '~',
+          timeouts: { connectMs: 1000, commandMs: 1000, checkMs: 1000 },
+          maxOutputBytes: 1024 * 1024,
+          sudo: { mode: 'off', allow: [], deny: [] },
+        },
+        send: async () => {
+          sendCalls += 1;
+          throw new Error('send must not be called after retarget');
+        },
+        close: async (reason) => {
+          closeReasons.push(reason ?? '');
+          return { ...CLOSE_FACTS, reason: reason ?? 'explicit' };
+        },
+      }),
+    );
+    await pinTrust(dir);
+
+    const result = await sessionSend(
+      { session_id: 'sess_fake', command: 'echo hi' },
+      makeCtx(dir, makeConfig(dir)),
+    );
+
+    expect(result.isError).toBe(true);
+    const structured = result.structuredContent as {
+      error: { kind: string; code: string; details?: Record<string, unknown> };
+    };
+    expect(structured.error).toMatchObject({ kind: 'HostKey', code: 'host_key' });
+    expect(structured.error.details?.['reason']).toBe('alias_retargeted');
+    expect(sendCalls).toBe(0);
+    expect(closeReasons).toEqual(['alias_retargeted']);
     expect(registry.get('sess_fake')).toBeUndefined();
     expect(await readAudit(dir)).toHaveLength(0);
   });

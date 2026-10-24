@@ -237,6 +237,28 @@ describe.skipIf(!bashAvailable)('openSessionTransport (local bash via spawnOverr
     expect(startError.facts.code).toBe('session_handshake_timeout');
   });
 
+  it('redacts the handshake nonce from pre-RDY diagnostics', async () => {
+    const nonce = '0123456789abcdef0123456789abcdef';
+    const error = await open({
+      nonce,
+      spawnOverride: {
+        file: 'bash',
+        argv: [
+          '--noprofile',
+          '--norc',
+          '-c',
+          `printf 'leak ${nonce}\\n'; sleep 0.3; exit 3`,
+        ],
+      },
+    }).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(SessionStartError);
+    const startError = error as SessionStartError;
+    expect(startError.facts.pre_rdy).toContain('leak <nonce>');
+    expect(startError.facts.pre_rdy).not.toContain(nonce);
+    expect(startError.facts.stderr ?? '').not.toContain(nonce);
+  });
+
   it('fails with session_exited_early and keeps pre-RDY diagnostics', async () => {
     const error = await open({
       spawnOverride: {

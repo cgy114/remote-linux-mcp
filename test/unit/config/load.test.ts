@@ -62,8 +62,36 @@ describe('loadConfig', () => {
     expect(cfg.sourcePath).toBe(paths.configFile);
     expect(cfg.baseDir).toBe(paths.configDir);
     expect(cfg.defaults.port).toBe(22);
-    expect(cfg.security).toEqual({ hostKeyPolicy: 'pinned' });
+    expect(cfg.security.hostKeyPolicy).toBe('pinned');
+    expect(cfg.security.commandPolicy.mode).toBe('enforce');
+    expect(cfg.security.commandPolicy.useDefaultDeny).toBe(true);
+    expect(cfg.security.commandPolicy.deny.length).toBeGreaterThan(0);
+    expect(cfg.security.audit).toEqual({
+      maxBytes: 16 * 1024 * 1024,
+      retainDays: 90,
+      dateRotate: true,
+    });
     expect(cfg.hosts.web1).toEqual({ host: '10.0.0.5', user: 'deploy' });
+  });
+
+  it('maps security.audit overrides into camelCase', async () => {
+    await write(`version: 1
+security:
+  audit:
+    max_bytes: 1048576
+    retain_days: 7
+    date_rotate: false
+hosts:
+  web1:
+    host: 10.0.0.5
+    user: deploy
+`);
+    const cfg = await loadConfig(paths);
+    expect(cfg.security.audit).toEqual({
+      maxBytes: 1024 * 1024,
+      retainDays: 7,
+      dateRotate: false,
+    });
   });
 
   it('maps snake_case host fields to camelCase', async () => {

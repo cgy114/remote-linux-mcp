@@ -107,9 +107,48 @@ export interface Defaults {
   files: FilesConfig;
 }
 
+/** 命令策略中的一条规则（内置 / 配置 / sudo）。 */
+export interface CommandRule {
+  raw: string;
+  kind: 'prefix' | 're';
+  source: 'builtin' | 'config' | 'sudo';
+  id: string;
+  regex?: RegExp;
+  prefix?: string;
+  dangerous?: boolean;
+  hard?: boolean;
+}
+
+/** P5 命令策略（展开后的默认值）。 */
+export interface CommandPolicy {
+  mode: 'off' | 'enforce' | 'read_only';
+  useDefaultDeny: boolean;
+  allow: CommandRule[];
+  confirm: CommandRule[];
+  deny: CommandRule[];
+}
+
+/** 一次策略求值的结论。surface 标明调用来自哪个工具入口。 */
+export interface CommandDecision {
+  action: 'allow' | 'deny' | 'confirm';
+  code: string;
+  ruleId?: string;
+  reason: string;
+  surface: 'ssh_exec' | 'session_send' | 'ssh_sudo';
+}
+
+/** security.audit 展开后的默认值。 */
+export interface AuditConfig {
+  maxBytes: number;
+  retainDays: number;
+  dateRotate: boolean;
+}
+
 export interface Security {
   hostKeyPolicy: 'pinned';
   knownHostsFile?: string;
+  commandPolicy: CommandPolicy;
+  audit: AuditConfig;
 }
 
 export interface HostConfig {

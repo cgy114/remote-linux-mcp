@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Logger } from '../types.js';
-import { ensureDir } from '../util/fsx.js';
+import { appendAuditRecord } from './sink.js';
+
+export { appendAuditRecord } from './sink.js';
 
 export type ExecAuditOutcome =
   | 'ok'
@@ -10,7 +11,8 @@ export type ExecAuditOutcome =
   | 'transport_failure'
   | 'timeout'
   | 'spawn_error'
-  | 'killed';
+  | 'killed'
+  | 'denied';
 
 /** 审计记录只存退出事实，不存命令/输出/env 值等任何内容。 */
 export interface AuditRunFacts {
@@ -64,6 +66,8 @@ export interface ExecAuditRecord {
   queue_ms?: number;
   failureCode?: string;
   failureKind?: string;
+  /** 仅用于 spawn 之前被拒绝的记录。 */
+  denied?: boolean;
 }
 
 export function auditFilePath(configDir: string): string {
@@ -145,45 +149,50 @@ export function buildExecAuditRecord(input: BuildExecAuditInput): ExecAuditRecor
   return record;
 }
 
-/** 进程内串行化写链：并发 append 不会交错，且永不 reject。 */
-let appendChain: Promise<void> = Promise.resolve();
-
 /**
- * 追加一行 JSON。目录自动创建，文件 mode 0o600；
- * 任何失败只写 log.warn，绝不让调用方 reject。
+ * 兼容旧调用点的包装：把 file 拆成 configDir + activeFile，交给统一的
+ * redact/rotate/append sink。目录自动创建，文件 mode 0o600，永不 reject。
  */
 export function appendAudit(record: unknown, opts: { file: string; log: Logger }): Promise<void> {
-  let line: string;
-  try {
-    line = `${JSON.stringify(record)}\n`;
-  } catch (err) {
-    try {
-      opts.log.warn(
-        { err: err instanceof Error ? err.message : String(err), file: opts.file },
-        'audit record could not be serialized',
-      );
-    } catch {
-      // 日志失败不影响返回
-    }
-    return Promise.resolve();
-  }
+  return appendAuditRecord(record, {
+    configDir: path.dirname(opts.file),
+    activeFile: path.basename(opts.file),
+    log: opts.log,
+  });
+}
 
-  const write = async (): Promise<void> => {
-    try {
-      await ensureDir(path.dirname(opts.file));
-      await fs.appendFile(opts.file, line, { encoding: 'utf8', mode: 0o600 });
-    } catch (err) {
-      try {
-        opts.log.warn(
-          { err: err instanceof Error ? err.message : String(err), file: opts.file },
-          'audit append failed',
-        );
-      } catch {
-        // 日志失败不影响返回
-      }
-    }
+export type SudoAuditMode = 'off' | 'passwordless' | 'password';
+
+export interface BuildSudoAuditInput extends BuildExecAuditInput {
+  sudoMode: SudoAuditMode;
+}
+
+export interface SudoAuditRecord extends Omit<ExecAuditRecord, 'tool'> {
+  tool: 'ssh_sudo';
+  sudo_mode: SudoAuditMode;
+}
+
+/**
+ * 生成 ssh_sudo 审计记录。与 ssh_exec 的差异只有 tool/sudo_mode；
+ * stdinBytes 固定为 0——sudo 密码通过 stdin 传输，但绝不进入审计。
+ */
+export function buildSudoAuditRecord(input: BuildSudoAuditInput): SudoAuditRecord {
+  const { sudoMode, ...rest } = input;
+  const base = buildExecAuditRecord({ ...rest, stdinBytes: 0 });
+  const record: SudoAuditRecord = {
+    ...base,
+    tool: 'ssh_sudo',
+    sudo_mode: sudoMode,
   };
-
-  appendChain = appendChain.then(write, write);
-  return appendChain;
+  if (input.run === undefined && input.failure !== undefined) {
+    if (input.failure.kind === 'Policy') {
+      record.outcome = 'denied';
+      record.denied = true;
+    } else if (input.failure.kind === 'Timeout') {
+      record.outcome = 'timeout';
+    } else {
+      record.outcome = 'spawn_error';
+    }
+  }
+  return record;
 }

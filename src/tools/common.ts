@@ -1,5 +1,6 @@
 import type { CallToolResult, McpServer, StandardSchemaWithJSON } from '@modelcontextprotocol/server';
 import type { ZodType } from 'zod';
+import type { CredentialProvider } from '../credentials/provider.js';
 import { ConfigError, UsageError } from '../errors/classes.js';
 import { formatToolError, toUserError } from '../errors/classify.js';
 import { serializeError } from '../log.js';
@@ -10,6 +11,8 @@ export interface ToolContext {
   paths: MCPPaths;
   log: Logger;
   getConfig: () => Promise<RemoteConfig>;
+  /** 可选注入（测试/嵌入）；未定义时使用进程单例 keyring provider。 */
+  credentialProvider?: CredentialProvider;
 }
 
 /** 文本内容 + 可选 structuredContent。 */

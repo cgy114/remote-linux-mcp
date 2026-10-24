@@ -2,6 +2,18 @@ import { describe, expect, it } from 'vitest';
 import { createSessionRegistry } from '../../src/session/registry.js';
 import type { Session } from '../../src/session/session.js';
 import type { CloseFacts, Snapshot } from '../../src/session/types.js';
+import type { EffectiveHost } from '../../src/types.js';
+
+const HOST: EffectiveHost = {
+  alias: 'web1',
+  host: 'a',
+  user: 'u',
+  port: 22,
+  cwd: '~',
+  timeouts: { connectMs: 1000, commandMs: 1000, checkMs: 1000 },
+  maxOutputBytes: 1024,
+  sudo: { mode: 'off', allow: [], deny: [] },
+};
 
 function expectUsageError(fn: () => unknown, code: string): void {
   let caught: unknown;
@@ -43,6 +55,7 @@ function fakeSession(
     id,
     alias: 'web1',
     destination,
+    host: { ...HOST, alias: 'web1' },
     cwd: '~',
     envKeys: [],
     idleTimeoutMs: 1000,

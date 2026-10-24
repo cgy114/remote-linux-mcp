@@ -13,6 +13,7 @@ import {
   PRE_RDY_DIAGNOSTIC_BYTES,
 } from './constants.js';
 import { createFrameParser, encodeCloseLine } from './frame.js';
+import { redactNonce } from './output.js';
 import type { FrameEvent, FrameParseErrorCode, FrameParseResult } from './types.js';
 
 const IS_WIN = process.platform === 'win32';
@@ -133,9 +134,13 @@ async function resolveTaskkill(): Promise<string> {
   }
 }
 
-function diagnosticFacts(pre: TailBuffer, stderr: TailBuffer): Pick<SessionStartFacts, 'pre_rdy' | 'stderr'> {
-  const preText = pre.text();
-  const errText = stderr.text();
+function diagnosticFacts(
+  pre: TailBuffer,
+  stderr: TailBuffer,
+  nonce: string,
+): Pick<SessionStartFacts, 'pre_rdy' | 'stderr'> {
+  const preText = redactNonce(pre.text(), nonce);
+  const errText = redactNonce(stderr.text(), nonce);
   return {
     ...(preText.length > 0 ? { pre_rdy: preText } : {}),
     ...(errText.length > 0 ? { stderr: errText } : {}),
@@ -304,9 +309,14 @@ async function openSessionTransportImpl(opts: OpenSessionTransportOptions): Prom
             code: spawnError !== undefined ? 'session_spawn_failed' : 'session_exited_early',
             exit_code: code,
             signal: sig,
-            ...diagnosticFacts(preRdy, localStderr),
+            ...diagnosticFacts(preRdy, localStderr, nonce),
             ...(spawnError !== undefined
-              ? { stderr: `${localStderr.text()}\n${String((spawnError as { message?: unknown }).message ?? spawnError)}`.trim() }
+              ? {
+                  stderr: redactNonce(
+                    `${localStderr.text()}\n${String((spawnError as { message?: unknown }).message ?? spawnError)}`.trim(),
+                    nonce,
+                  ),
+                }
               : {}),
           },
         );
@@ -343,7 +353,7 @@ async function openSessionTransportImpl(opts: OpenSessionTransportOptions): Prom
         failStart(
           new SessionStartError('received a control frame before RDY', {
             code: 'session_protocol_error',
-            ...diagnosticFacts(preRdy, localStderr),
+            ...diagnosticFacts(preRdy, localStderr, nonce),
           }),
         );
         return;
@@ -393,10 +403,10 @@ async function openSessionTransportImpl(opts: OpenSessionTransportOptions): Prom
         return exitedPromise;
       },
       get preRdyDiagnostic(): string {
-        return preRdy.text();
+        return redactNonce(preRdy.text(), nonce);
       },
       get stderrDiagnostic(): string {
-        return localStderr.text();
+        return redactNonce(localStderr.text(), nonce);
       },
     };
 
@@ -460,7 +470,7 @@ async function openSessionTransportImpl(opts: OpenSessionTransportOptions): Prom
             new SessionStartError(`frame parser failed during handshake: ${result.error}`, {
               code: 'session_protocol_error',
               parse_error: result.error,
-              ...diagnosticFacts(preRdy, localStderr),
+              ...diagnosticFacts(preRdy, localStderr, nonce),
             }),
           );
         } else {
@@ -494,7 +504,7 @@ async function openSessionTransportImpl(opts: OpenSessionTransportOptions): Prom
       failStart(
         new SessionStartError(`timed out after ${handshakeTimeoutMs}ms waiting for RDY`, {
           code: 'session_handshake_timeout',
-          ...diagnosticFacts(preRdy, localStderr),
+          ...diagnosticFacts(preRdy, localStderr, nonce),
         }),
       );
     }, handshakeTimeoutMs);
@@ -507,7 +517,7 @@ async function openSessionTransportImpl(opts: OpenSessionTransportOptions): Prom
         failStart(
           new SessionStartError('failed to write session bootstrap', {
             code: 'session_write_failed',
-            ...diagnosticFacts(preRdy, localStderr),
+            ...diagnosticFacts(preRdy, localStderr, nonce),
             ...(err instanceof Error ? { stderr: err.message } : {}),
           }),
         );

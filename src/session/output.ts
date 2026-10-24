@@ -3,6 +3,12 @@ import type { CapturedOutput, OutputCapture, OutputEncoding } from './types.js';
 
 const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true });
 
+/** 把会话 nonce 的唯一可见形式替换为占位符；未提供 nonce 时原样返回。 */
+export function redactNonce(text: string, nonce: string | undefined): string {
+  if (nonce === undefined || nonce.length === 0) return text;
+  return text.split(nonce).join('<nonce>');
+}
+
 /** 合法 UTF-8 且不含 NUL 才按文本返回；否则按 base64 保真返回。 */
 function detectEncoding(buf: Buffer): OutputEncoding {
   if (buf.includes(0)) return 'base64';
@@ -18,7 +24,7 @@ function detectEncoding(buf: Buffer): OutputEncoding {
  * 创建有界输出捕获：保留头部 floor(maxBytes/2) 与尾部其余字节，
  * 中间丢弃但持续累计总字节数。ANSI 转义与二进制内容原样保留。
  */
-export function createOutputCapture(maxBytes: number): OutputCapture {
+export function createOutputCapture(maxBytes: number, nonce?: string): OutputCapture {
   if (!Number.isInteger(maxBytes) || maxBytes < 1) {
     throw new RangeError('maxBytes must be a positive integer');
   }
@@ -77,7 +83,10 @@ export function createOutputCapture(maxBytes: number): OutputCapture {
 
     const encoding = detectEncoding(kept);
     finished = {
-      text: encoding === 'utf-8' ? kept.toString('utf8') : kept.toString('base64'),
+      text:
+        encoding === 'utf-8'
+          ? redactNonce(kept.toString('utf8'), nonce)
+          : kept.toString('base64'),
       encoding,
       truncated,
       bytes: total,

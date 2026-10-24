@@ -135,6 +135,8 @@ export async function sessionStart(
           target: {
             alias: target.host.alias,
             destination: target.destination,
+            // 快照建立会话时的有效主机；session_send 的信任复查不再重新解析 alias。
+            host: target.host,
             defaultTimeoutMs: target.host.timeouts.commandMs,
             defaultMaxOutputBytes: target.host.maxOutputBytes,
           },
@@ -142,6 +144,7 @@ export async function sessionStart(
           cwd: plan.cwd,
           envKeys: plan.envKeys,
           idleTimeoutMs: plan.idleTimeoutMs,
+          nonce: plan.nonce,
           maxQueue: registry.maxQueue,
           log: ctx.log,
           // 自关闭（idle/timeout/protocol/transport/shutdown）与显式关闭都经此写审计；
@@ -166,6 +169,7 @@ export async function sessionStart(
                 reason: facts.reason,
               }),
               ctx,
+              target.config.security.audit,
             );
           },
         });
@@ -201,6 +205,7 @@ export async function sessionStart(
           ...(failure !== undefined ? { failure: { code: failure.code, kind: failure.kind } } : {}),
         }),
         ctx,
+        target.config.security.audit,
       );
     },
     auditDenied: async ({ error, target }) => {
@@ -214,6 +219,7 @@ export async function sessionStart(
           failure: { code: error.code, kind: error.kind },
         }),
         ctx,
+        target?.config.security.audit,
       );
     },
     format: ({ target, produced }) => {

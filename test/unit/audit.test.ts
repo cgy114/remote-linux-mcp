@@ -175,10 +175,18 @@ describe('appendAudit', () => {
     expect(log.warn).toHaveBeenCalled();
   });
 
-  it('never rejects for an unserializable record', async () => {
+  it('redacts circular references instead of failing serialization', async () => {
     const circular: Record<string, unknown> = {};
     circular['self'] = circular;
+    circular['password'] = 'canary-secret';
     await expect(appendAudit(circular, { file: auditFilePath(root), log })).resolves.toBeUndefined();
-    expect(log.warn).toHaveBeenCalled();
+
+    const record = JSON.parse(
+      (await fs.readFile(auditFilePath(root), 'utf8')).trim(),
+    ) as Record<string, unknown>;
+    expect(record['self']).toBe('[Circular]');
+    expect(record['password']).toBe('[REDACTED]');
+    expect(JSON.stringify(record)).not.toContain('canary-secret');
+    expect(log.warn).not.toHaveBeenCalled();
   });
 });

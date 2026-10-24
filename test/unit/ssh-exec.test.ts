@@ -340,6 +340,112 @@ describe('ssh_exec unit', () => {
       expect(JSON.stringify(last)).not.toContain('ping');
     });
 
+    it('denies a hard-listed command before spawning and writes a denied audit', async () => {
+      await installTrust();
+
+      const result = await sshExec({ host: 'web1', command: "bash -c 'echo hi'" }, ctx);
+
+      expect(result.isError).toBe(true);
+      const structured = result.structuredContent as {
+        error: { kind: string; code: string };
+      };
+      expect(structured.error.kind).toBe('Policy');
+      expect(structured.error.code).toBe('policy_denied');
+      expect(runSshMock).not.toHaveBeenCalled();
+
+      const auditPath = path.join(paths.configDir, 'audit.jsonl');
+      const records = (await fs.readFile(auditPath, 'utf8'))
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        tool: 'ssh_exec',
+        alias: 'web1',
+        destination: 'deploy@10.0.0.5:22',
+        commandSha256: createHash('sha256').update("bash -c 'echo hi'").digest('hex'),
+        commandBytes: 17,
+        outcome: 'denied',
+        denied: true,
+        failureKind: 'Policy',
+        failureCode: 'policy_denied',
+      });
+      expect(JSON.stringify(records[0])).not.toContain('echo hi');
+    });
+
+    it('read_only allows allowlisted commands and denies everything else without spawning', async () => {
+      await setup(`version: 1
+security:
+  command_policy:
+    mode: read_only
+    allow:
+      - prefix:ls
+defaults:
+  default_host: web1
+  default_cwd: /home/test
+hosts:
+  web1:
+    host: 10.0.0.5
+    user: deploy
+`);
+      await installTrust();
+      runSshMock.mockResolvedValue(makeRun({ stdout: 'file\n' }));
+
+      const allowed = await sshExec({ host: 'web1', command: 'ls' }, ctx);
+      expect(allowed.isError).not.toBe(true);
+      expect(runSshMock).toHaveBeenCalledTimes(1);
+
+      const denied = await sshExec({ host: 'web1', command: 'touch build' }, ctx);
+      expect(denied.isError).toBe(true);
+      const structured = denied.structuredContent as {
+        error: { kind: string; code: string };
+      };
+      expect(structured.error.kind).toBe('Policy');
+      expect(structured.error.code).toBe('policy_not_allowed');
+      expect(runSshMock).toHaveBeenCalledTimes(1);
+
+      const auditPath = path.join(paths.configDir, 'audit.jsonl');
+      const records = (await fs.readFile(auditPath, 'utf8'))
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      // 成功一次 + 拒绝一次；拒绝记录带 denied 标记。
+      expect(records).toHaveLength(2);
+      expect(records[1]).toMatchObject({
+        outcome: 'denied',
+        denied: true,
+        failureCode: 'policy_not_allowed',
+      });
+    });
+
+    it('mode=off leaves the existing execution path unchanged', async () => {
+      await setup(`version: 1
+security:
+  command_policy:
+    mode: off
+defaults:
+  default_host: web1
+  default_cwd: /home/test
+hosts:
+  web1:
+    host: 10.0.0.5
+    user: deploy
+`);
+      await installTrust();
+      runSshMock.mockResolvedValue(makeRun());
+
+      const result = await sshExec({ host: 'web1', command: "bash -c 'echo hi'" }, ctx);
+
+      expect(result.isError).not.toBe(true);
+      expect(runSshMock).toHaveBeenCalledTimes(1);
+      const auditPath = path.join(paths.configDir, 'audit.jsonl');
+      const record = JSON.parse(
+        (await fs.readFile(auditPath, 'utf8')).trim().split(/\r?\n/)[0] as string,
+      ) as Record<string, unknown>;
+      expect(record).not.toHaveProperty('denied');
+      expect(record['outcome']).toBe('ok');
+    });
+
     it('exposes the expected size limits from the single source of truth', () => {
       expect(EXEC_LIMITS.maxCommandBytes).toBe(MAX_COMMAND_BYTES);
       expect(EXEC_LIMITS.maxStdinBytes).toBe(MAX_STDIN_BYTES);

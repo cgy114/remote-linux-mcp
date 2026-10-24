@@ -1,7 +1,7 @@
 import { UsageError } from '../errors/classes.js';
 import { withHostLease } from '../pipeline/lease.js';
 import type { HostLimiter } from '../ssh/host-limiter.js';
-import type { Logger } from '../types.js';
+import type { EffectiveHost, Logger } from '../types.js';
 import { MAX_QUEUED_COMMANDS } from './constants.js';
 import { encodeCommandLine } from './frame.js';
 import { createOutputCapture } from './output.js';
@@ -20,6 +20,8 @@ import type {
 export interface SessionTarget {
   alias: string;
   destination: string;
+  /** 建立会话时的有效主机快照；后续发送前信任复查必须用它，而不是重新解析 alias。 */
+  host: EffectiveHost;
   /** 未显式提供 timeout_ms 时的命令超时。 */
   defaultTimeoutMs?: number;
   /** 未显式提供 max_output_bytes 时的输出上限。 */
@@ -45,6 +47,8 @@ export interface Session {
   readonly id: SessionId;
   readonly alias: string;
   readonly destination: string;
+  /** 建立会话时的目标主机快照（含 alias/host/port/identityFile 等）。 */
+  readonly host: EffectiveHost;
   readonly cwd: string;
   readonly envKeys: readonly string[];
   readonly idleTimeoutMs: number;
@@ -67,6 +71,8 @@ export interface CreateSessionOptions {
   cwd: string;
   envKeys: readonly string[];
   idleTimeoutMs: number;
+  /** 握手 nonce；用于从输出与诊断中清除协议标记。 */
+  nonce?: string;
   /** 指定时改为周期性检查空闲（毫秒）；否则使用一次性定时器。 */
   idleSweepMs?: number;
   log: Logger;
@@ -425,6 +431,7 @@ export function createSession(opts: CreateSessionOptions): Session {
         const currentSeq = (seq += 1);
         const capture = createOutputCapture(
           entry.input.maxOutputBytes ?? defaultMaxOutputBytes,
+          opts.nonce,
         );
         let resolveCompletion: () => void = () => undefined;
         const completion = new Promise<void>((resolve) => {
@@ -534,6 +541,7 @@ export function createSession(opts: CreateSessionOptions): Session {
     id,
     alias: target.alias,
     destination: target.destination,
+    host: target.host,
     cwd,
     envKeys: [...envKeys],
     idleTimeoutMs,

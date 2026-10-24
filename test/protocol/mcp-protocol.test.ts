@@ -351,6 +351,7 @@ async function assertToolsListed(harness: ServerHarness, id: number): Promise<vo
     'ssh_download',
     'ssh_read_file',
     'ssh_write_file',
+    'ssh_sudo',
     'session_start',
     'session_send',
     'session_close',
@@ -358,7 +359,7 @@ async function assertToolsListed(harness: ServerHarness, id: number): Promise<vo
   ]) {
     expect(names).toContain(name);
   }
-  expect(names).toHaveLength(11);
+  expect(names).toHaveLength(12);
 
   const annotationsOf = (name: string): ToolAnnotations | undefined =>
     tools.find((tool) => tool.name === name)?.annotations;
@@ -380,6 +381,12 @@ async function assertToolsListed(harness: ServerHarness, id: number): Promise<vo
     readOnlyHint: true,
     destructiveHint: false,
     idempotentHint: true,
+    openWorldHint: true,
+  });
+  expect(annotationsOf('ssh_sudo')).toEqual({
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
     openWorldHint: true,
   });
 

@@ -1,3 +1,4 @@
+import { redactAuditText } from './audit/redact.js';
 import type { LogLevel, Logger } from './types.js';
 
 const LEVEL_RANK: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
@@ -5,9 +6,6 @@ const LEVEL_RANK: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, er
 const SECRET_KEY_RE = /password|passwd|secret|token|authorization|api[-_]?key|private[-_]?key/i;
 const REDACTED = '[REDACTED]';
 const STACK_MAX_BYTES = 4096;
-
-// 匹配 ProxyCommand=<值>：带引号则到闭合引号为止；裸值保守地脱敏到行尾（命令中常含空格参数）
-const PROXY_COMMAND_RE = /(ProxyCommand=)(?:"[^"]*"|'[^']*'|[^\n]*)/gi;
 
 function parseLevel(raw: string | undefined): LogLevel {
   switch (raw?.toLowerCase()) {
@@ -31,7 +29,8 @@ export function redact(value: unknown, keys: readonly string[] = []): unknown {
 
   const walk = (v: unknown): unknown => {
     if (typeof v === 'string') {
-      return v.replace(PROXY_COMMAND_RE, `$1${REDACTED}`);
+      // 与审计共用同一套模式（Bearer、provider key、password=、URL userinfo、ProxyCommand）。
+      return redactAuditText(v);
     }
     if (v === null || typeof v !== 'object') {
       return v;

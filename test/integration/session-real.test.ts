@@ -525,12 +525,13 @@ describe.skipIf(!E2E)('integration: persistent sessions on real host (orangepi)'
       expect((await list()).count).toBe(0);
       expect(getSessionRegistry().size).toBe(0);
 
-      // 用字段精确匹配避免 pgrep/ps 自身命令行被计入；只看本用户进程。
+      // 用整行精确匹配（-x）避免 ps/grep 自身命令行被计入；grep 无匹配时
+      // 用 `; true` 把管道退出码归零。不要用 awk（内置 hard 规则会拒绝）。
       const check = await sshExec(
         {
           host: ALIAS,
           command:
-            'ps -u "$(id -un)" -o pid=,args= | awk \'$2 == "bash" && $3 == "--noprofile" && $4 == "--norc" { print $1 }\'',
+            "ps -u \"$(id -un)\" -o args= | grep -xF -- 'bash --noprofile --norc'; true",
           timeout_ms: 15_000,
         },
         ctx,

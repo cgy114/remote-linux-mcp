@@ -58,16 +58,17 @@ describe('buildSessionBootstrap', () => {
   });
   const script = scriptOf(lines);
 
-  it('starts with fd setup and merges remote stderr into stdout', () => {
-    expect(lines[0]).toBe('exec 3>&1; exec 2>&1');
+  it('starts by disabling xtrace, then fd setup and stderr merge', () => {
+    expect(lines[0]).toBe('builtin set +x');
+    expect(lines[1]).toBe('exec 3>&1; exec 2>&1');
   });
 
   it('places sorted env exports before cd', () => {
-    expect(lines.slice(1, 3)).toEqual([
+    expect(lines.slice(2, 4)).toEqual([
       "export FOO='bar'",
       "export PATH='/usr/bin:/bin'",
     ]);
-    expect(lines[3]).toBe(`builtin cd -- ${renderCwd('~/work')} || exit 125`);
+    expect(lines[4]).toBe(`builtin cd -- ${renderCwd('~/work')} || exit 125`);
   });
 
   it('includes a trap that restores fd1/fd2', () => {
@@ -103,7 +104,21 @@ describe('buildSessionBootstrap', () => {
     expect(lines[evalIdx + 1]).toBe('  RMCP_RC=$?');
     expect(lines[evalIdx + 2]).toBe('  exec 1>&3 2>&3');
     expect(lines[evalIdx + 3]).toBe('  set +e');
-    expect(lines[evalIdx + 4]).toContain('E:%s:%s');
+    expect(lines[evalIdx + 4]).toBe('  builtin set +x');
+    expect(lines[evalIdx + 5]).toContain('E:%s:%s');
+  });
+
+  it('disables xtrace at bootstrap start and before every frame write', () => {
+    const whileIdx = lines.findIndex((line) => line.startsWith('while '));
+    expect(lines[whileIdx + 1]).toBe('  builtin set +x');
+
+    const frameLines = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.includes(':B:%s') || line.includes(':E:%s'));
+    expect(frameLines).toHaveLength(2);
+    for (const { index } of frameLines) {
+      expect(lines[index - 1]).toBe('  builtin set +x');
+    }
   });
 
   it('handles the Q close line by leaving the loop', () => {
@@ -136,7 +151,7 @@ describe('buildSessionBootstrap', () => {
 
   it('accepts an empty env block', () => {
     const bare = buildSessionBootstrap({ nonce: NONCE, cwdExpr: renderCwd('/'), envLines: [] });
-    expect(bare).toHaveLength(20);
+    expect(bare).toHaveLength(24);
     expect(bare.every((line) => !line.startsWith('export '))).toBe(true);
   });
 
@@ -203,6 +218,22 @@ describe('buildSessionBootstrap', () => {
       { type: 'E', seq: 3, rc: 0 },
     ]);
     expect(run.data.toString()).toContain('hello\n');
+  });
+
+  it.skipIf(!bashAvailable)('keeps the nonce out of output when a command enables xtrace', () => {
+    const run = runBootstrap('1 set -x\n2 echo hi\nQ\n');
+    expect(run.status, run.stderr).toBe(0);
+
+    // xtrace 模式下循环体/帧写前都会 `builtin set +x`；捕获数据不得出现 nonce。
+    expect(run.data.toString()).not.toContain(NONCE);
+    expect(run.data.toString()).toContain('hi\n');
+    const ends = run.frames.filter(
+      (frame): frame is Extract<Frame, { type: 'E' }> => frame.type === 'E',
+    );
+    expect(ends).toEqual([
+      { type: 'E', seq: 1, rc: 0 },
+      { type: 'E', seq: 2, rc: 0 },
+    ]);
   });
 
   it.skipIf(!bashAvailable)('re-anchors stdout and stderr after a command redirects them', () => {

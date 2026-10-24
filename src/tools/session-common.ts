@@ -1,4 +1,4 @@
-import { appendAudit, auditFilePath } from '../audit/audit.js';
+import { appendAuditRecord } from '../audit/audit.js';
 import { UsageError } from '../errors/classes.js';
 import { makeToolError } from '../errors/taxonomy.js';
 import {
@@ -9,7 +9,7 @@ import {
 import type { Session } from '../session/session.js';
 import { SessionStartError } from '../session/transport.js';
 import type { SendOutcome } from '../session/types.js';
-import type { Logger, ToolError } from '../types.js';
+import type { AuditConfig, Logger, ToolError } from '../types.js';
 import { errorToToolError, type ToolAnnotations, type ToolContext } from './common.js';
 
 /** 会话专用提示：通用 taxonomy 的 ssh 提示会误导用户。 */
@@ -89,14 +89,16 @@ export function requireSession(id: string): Session {
   return session;
 }
 
-/** 追加一条会话审计记录；appendAudit 永不 reject。 */
+/** 追加一条会话审计记录；appendAuditRecord 永不 reject。 */
 export async function appendSessionAudit(
   record: unknown,
   ctx: ToolContext,
+  audit?: AuditConfig,
 ): Promise<void> {
-  await appendAudit(record, {
-    file: auditFilePath(ctx.paths.configDir),
+  await appendAuditRecord(record, {
+    configDir: ctx.paths.configDir,
     log: ctx.log,
+    ...(audit !== undefined ? { audit } : {}),
   });
 }
 
@@ -149,15 +151,26 @@ export function sendOutcomeToToolError(
   sessionId: string,
   outcome: SendOutcome,
 ): ToolError | undefined {
+  if (outcome.status === 'ok') return undefined;
+
+  // 失败结果只暴露输出元数据，绝不返回输出正文。
+  const details: Record<string, unknown> = {
+    session_id: sessionId,
+    seq: outcome.seq,
+    output_bytes: outcome.output.bytes,
+    truncated: outcome.output.truncated,
+    encoding: outcome.output.encoding,
+    duration_ms: outcome.duration_ms,
+    timed_out: outcome.status === 'timeout',
+  };
+
   switch (outcome.status) {
-    case 'ok':
-      return undefined;
     case 'timeout':
       return withHint(
         makeToolError('Timeout', {
           code: 'session_timeout',
           message: `session ${sessionId} command timed out; the session was closed`,
-          details: { session_id: sessionId, seq: outcome.seq },
+          details,
         }),
         HINT_SESSION_TIMEOUT,
         false,
@@ -167,7 +180,7 @@ export function sendOutcomeToToolError(
         makeToolError('Policy', {
           code: 'session_closed',
           message: `session ${sessionId} was closed before the command finished`,
-          details: { session_id: sessionId, seq: outcome.seq },
+          details,
         }),
         HINT_SESSION_CLOSED,
       );
@@ -175,7 +188,7 @@ export function sendOutcomeToToolError(
       return makeToolError('Internal', {
         code: outcome.error === 'io' ? 'session_io_error' : 'session_protocol_error',
         message: outcome.message,
-        details: { session_id: sessionId, seq: outcome.seq, frame_error: outcome.error },
+        details: { ...details, frame_error: outcome.error },
       });
   }
 }

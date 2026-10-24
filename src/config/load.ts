@@ -6,7 +6,7 @@ import { ConfigError } from '../errors/classes.js';
 import { serializeError } from '../log.js';
 import type { HostConfig, Logger, MCPPaths, RemoteConfig, Security } from '../types.js';
 import { expandHome, normalizePath } from './paths.js';
-import { configSchema, defaultsFor, type RawConfig } from './schema.js';
+import { auditFor, commandPolicyFor, configSchema, defaultsFor, type RawConfig } from './schema.js';
 
 /** 每次都重新读盘并校验。缓存由 loadConfigLazy 负责。 */
 export async function loadConfig(paths: MCPPaths): Promise<RemoteConfig> {
@@ -91,7 +91,11 @@ function parseYaml(text: string, file: string): unknown {
 
 function buildSecurity(raw: RawConfig, baseDir: string, home: string): Security {
   const sec = raw.security;
-  const out: Security = { hostKeyPolicy: 'pinned' };
+  const out: Security = {
+    hostKeyPolicy: 'pinned',
+    commandPolicy: commandPolicyFor(raw),
+    audit: auditFor(raw),
+  };
   if (sec?.known_hosts_file !== undefined) {
     out.knownHostsFile = resolveAgainst(sec.known_hosts_file, baseDir, home);
   }

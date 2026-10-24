@@ -133,10 +133,17 @@ describe('session audit builders', () => {
       ['explicit', 'ok'],
       ['idle_timeout', 'closed'],
       ['shutdown', 'closed'],
+      ['transport_closed', 'closed'],
+      ['stdin_end', 'closed'],
+      ['stdin_close', 'closed'],
+      ['SIGINT', 'closed'],
+      ['SIGTERM', 'closed'],
+      ['SIGHUP', 'closed'],
       ['command_timeout', 'timeout'],
       ['protocol_error', 'error'],
       ['transport_exit', 'error'],
       ['trust_revoked', 'denied'],
+      ['alias_retargeted', 'denied'],
     ];
     for (const [reason, outcome] of cases) {
       expect(deriveSessionCloseOutcome({ sessionId: 's', reason })).toBe(outcome);
