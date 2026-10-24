@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -128,6 +129,37 @@ describe('tar', () => {
       await createLocalArchive({ source: src, archive });
       await extract(archive, dest);
       await expect(fs.readFile(path.join(dest, 'src', 'a.txt'), 'utf8')).resolves.toBe('a');
+    });
+
+    it('archives a directory larger than the legacy 1 MiB output cap', async () => {
+      const src = path.join(root, 'large');
+      await fs.mkdir(src);
+      const blobs = Array.from({ length: 3 }, () => randomBytes(1024 * 1024));
+      for (const [index, blob] of blobs.entries()) {
+        await fs.writeFile(path.join(src, `blob-${index}.bin`), blob);
+      }
+      const archive = path.join(root, 'large.tar');
+      const dest = path.join(root, 'large-dest');
+      await fs.mkdir(dest);
+
+      // 不传 maxOutputBytes：默认必须是归档上限而不是 1 MiB。
+      const created = await createLocalArchive({ source: src, archive, contents: true });
+      expect(tarFailure(created)).toBeUndefined();
+      expect(created.stdoutTruncated).toBe(false);
+      const archiveSize = (await fs.stat(archive)).size;
+      console.log(
+        `[tar] large archive bytes=${archiveSize} payload=${blobs.length * 1024 * 1024} files=${blobs.length}`,
+      );
+      expect(archiveSize).toBeGreaterThan(1024 * 1024);
+
+      const extracted = await extract(archive, dest);
+      expect(tarFailure(extracted)).toBeUndefined();
+      for (const [index, blob] of blobs.entries()) {
+        const roundtripped = await fs.readFile(path.join(dest, `blob-${index}.bin`));
+        expect(createHash('sha256').update(roundtripped).digest('hex')).toBe(
+          createHash('sha256').update(blob).digest('hex'),
+        );
+      }
     });
 
     it('roundtrips gzip archives', async () => {

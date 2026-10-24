@@ -32,6 +32,8 @@ const state = vi.hoisted(() => {
     remoteRun: (() => mkRun(0)) as () => unknown,
     remoteTarRun: (() => mkRun(0)) as () => unknown,
     extractFiles: {} as Record<string, { content: Buffer; mode?: number }>,
+    archiveMaxOutputBytes: undefined as number | undefined,
+    remoteTarCalls: [] as { command: string; maxOutputBytes?: number }[],
   };
 });
 
@@ -77,8 +79,9 @@ vi.mock('../../../src/transfer/tar.js', async (importOriginal) => {
   const { promises: fsPromises } = await import('node:fs');
   return {
     ...actual,
-    createLocalArchive: async () => {
+    createLocalArchive: async (opts: { maxOutputBytes?: number }) => {
       state.events.push('archive');
+      state.archiveMaxOutputBytes = opts.maxOutputBytes;
       return state.remoteTarRun();
     },
     runLocalTar: async (opts: { argv: readonly string[] }) => {
@@ -96,8 +99,16 @@ vi.mock('../../../src/transfer/tar.js', async (importOriginal) => {
       }
       return state.remoteTarRun();
     },
-    runRemoteTar: async (_deps: unknown, command: string) => {
+    runRemoteTar: async (
+      _deps: unknown,
+      command: string,
+      opts: { maxOutputBytes?: number } = {},
+    ) => {
       state.events.push(command.includes('-xpf') ? 'extract' : 'create');
+      state.remoteTarCalls.push({
+        command,
+        ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
+      });
       return state.remoteTarRun();
     },
   };
@@ -168,7 +179,12 @@ function reset(): void {
   state.remoteRun = () => state.mkRun(0);
   state.remoteTarRun = () => state.mkRun(0);
   state.extractFiles = {};
+  state.archiveMaxOutputBytes = undefined;
+  state.remoteTarCalls.length = 0;
 }
+
+/** makeDeps().limits 对应的归档流上限（10 MB 总量 + 100 项 + 64 MiB）。 */
+const EXPECTED_ARCHIVE_LIMIT = 10_000_000 + 100 * 1024 + 64 * 1024 * 1024;
 
 describe('directory transfer state machines', () => {
   let dir: string;
@@ -219,6 +235,21 @@ describe('directory transfer state machines', () => {
         'manifest',
         'swap',
       ]);
+    });
+
+    it('archives with the archive stream limit instead of the 1 MiB output default', async () => {
+      state.probeManifest = () => ({ ok: true, entries: [HELLO_ENTRY] });
+      const facts = await uploadTree({
+        deps: makeDeps(),
+        local: source(),
+        manifest: [HELLO_ENTRY],
+        remote: '~/tree',
+        overwrite: false,
+      });
+
+      expect(facts.ok).toBe(true);
+      expect(state.archiveMaxOutputBytes).toBe(EXPECTED_ARCHIVE_LIMIT);
+      expect(state.archiveMaxOutputBytes).not.toBe(1_048_576);
     });
 
     it('refuses an existing target when overwrite is false', async () => {
@@ -380,6 +411,25 @@ describe('directory transfer state machines', () => {
       expect(facts.verified).toBe(true);
       expect(await fs.readFile(path.join(dir, 'out', 'a.txt'), 'utf8')).toBe('hello');
       expect(state.events.slice(0, 4)).toEqual(['probe', 'manifest', 'create', 'extract-local']);
+    });
+
+    it('creates the remote archive with the archive stream limit', async () => {
+      remoteDir();
+      state.probeManifest = () => ({ ok: true, entries: [HELLO_ENTRY] });
+      state.extractFiles = { 'a.txt': { content: Buffer.from('hello'), mode: 0o644 } };
+
+      const facts = await downloadTree({
+        deps: makeDeps(),
+        remote: '~/tree',
+        localTarget: target(),
+        overwrite: false,
+      });
+
+      expect(facts.ok).toBe(true);
+      const create = state.remoteTarCalls.find((call) => call.command.includes(' -cf - '));
+      expect(create).toBeDefined();
+      expect(create?.maxOutputBytes).toBe(EXPECTED_ARCHIVE_LIMIT);
+      expect(create?.maxOutputBytes).not.toBe(1_048_576);
     });
 
     it('rejects a non-directory remote source', async () => {

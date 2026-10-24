@@ -9,6 +9,7 @@ import { spawnCapture } from '../ssh/runner.js';
 import type { RunResult, ToolError } from '../types.js';
 import { runRemoteCommand, type TransferDeps } from './deps.js';
 import { classifyTransportRun, remoteFailure, stderrTail } from './errors.js';
+import { ARCHIVE_STREAM_MAX_BYTES } from './file-policy.js';
 
 export interface RemoteTarOptions {
   /** 归档目录内容（"."）而不是目录本身。 */
@@ -109,7 +110,13 @@ export interface RunLocalTarInput {
   binary?: string | LocalTarBinary;
 }
 
-/** 运行本地 tar（stdinFile/stdoutFile 用于流式管道）。 */
+/**
+ * 运行本地 tar（stdinFile/stdoutFile 用于流式管道）。
+ *
+ * maxOutputBytes 在 stdoutFile 模式下是写盘上限：超过即杀进程树并截断归档，
+ * 因此默认使用归档绝对上限（8 GiB）而不是交互输出默认的 1 MiB。需要按配置
+ * 收紧时由调用方传入 archiveStreamLimit(limits)。
+ */
 export async function runLocalTar(input: RunLocalTarInput): Promise<RunResult> {
   const binary =
     typeof input.binary === 'string'
@@ -120,7 +127,7 @@ export async function runLocalTar(input: RunLocalTarInput): Promise<RunResult> {
     argv: [...binary.argsPrefix, ...input.argv],
     env: buildChildEnv(),
     timeoutMs: input.timeoutMs ?? 300_000,
-    maxOutputBytes: input.maxOutputBytes ?? 1_048_576,
+    maxOutputBytes: input.maxOutputBytes ?? ARCHIVE_STREAM_MAX_BYTES,
     ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
     ...(input.stdinFile !== undefined ? { stdinFile: input.stdinFile } : {}),
     ...(input.stdoutFile !== undefined ? { stdoutFile: input.stdoutFile } : {}),
@@ -133,6 +140,8 @@ export interface CreateLocalArchiveInput {
   contents?: boolean;
   gzip?: boolean;
   timeoutMs?: number;
+  /** 写盘上限；默认归档绝对上限（见 runLocalTar）。 */
+  maxOutputBytes?: number;
   binary?: string;
 }
 
@@ -155,6 +164,7 @@ export async function createLocalArchive(input: CreateLocalArchiveInput): Promis
     binary,
     stdoutFile: path.resolve(input.archive),
     ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+    ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {}),
     label: 'local tar create',
   });
 }
@@ -163,6 +173,8 @@ export interface RunRemoteTarOptions {
   stdinFile?: string;
   stdoutFile?: string;
   timeoutMs?: number;
+  /** 覆盖默认输出上限；stdoutFile 模式应传 archiveStreamLimit(limits)。 */
+  maxOutputBytes?: number;
   label?: string;
 }
 
@@ -176,6 +188,7 @@ export async function runRemoteTar(
     ...(opts.stdinFile !== undefined ? { stdinFile: opts.stdinFile } : {}),
     ...(opts.stdoutFile !== undefined ? { stdoutFile: opts.stdoutFile } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
     label: opts.label ?? `tar:${deps.target.host.alias}`,
   });
 }

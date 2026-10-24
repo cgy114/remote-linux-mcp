@@ -354,6 +354,64 @@ describe.skipIf(!E2E)('integration: file transfer on real host (orangepi)', () =
     }
   }, TEST_TIMEOUT_MS);
 
+  it('round-trips a >1 MiB directory with manifest and sha verification', async () => {
+    const tree = path.join(localRoot, 'large-tree');
+    await fs.mkdir(path.join(tree, 'nested'), { recursive: true });
+    const files = [
+      { rel: 'blob-a.bin', data: randomBytes(1536 * 1024) },
+      { rel: 'nested/blob-b.bin', data: randomBytes(1280 * 1024) },
+      { rel: 'nested/blob-c.bin', data: randomBytes(1024 * 1024 + 4096) },
+    ].map((file) => ({ ...file, sha: sha256(file.data) }));
+    for (const file of files) {
+      await fs.writeFile(path.join(tree, ...file.rel.split('/')), file.data);
+    }
+    const totalBytes = files.reduce((sum, file) => sum + file.data.length, 0);
+    expect(totalBytes).toBeGreaterThan(1024 * 1024);
+
+    const remoteTree = `${remoteRoot}/large-tree`;
+    const uploadStart = Date.now();
+    const upload = await withRetry('upload large tree', () =>
+      sshUpload(
+        { host: ALIAS, local_path: tree, remote_path: remoteTree, recursive: true },
+        ctx,
+      ),
+    );
+    const uploadMs = Date.now() - uploadStart;
+    console.log(
+      `[e2e large dir] upload ms=${uploadMs} bytes=${String(structured(upload)['bytes'])} files=${String(structured(upload)['file_count'])}`,
+    );
+    expect(upload.isError, textOf(upload)).not.toBe(true);
+    expect(structured(upload)['kind']).toBe('directory');
+    expect(structured(upload)['file_count']).toBe(files.length);
+    expect(structured(upload)['bytes']).toBe(totalBytes);
+
+    for (const file of files) {
+      expect(await remoteSha(`${remoteTree}/${file.rel}`)).toBe(file.sha);
+    }
+    const remoteListing = await runRemote(`find ${shq(remoteTree)} -type f | wc -l`);
+    expect(remoteListing.isError, textOf(remoteListing)).not.toBe(true);
+    expect(stdoutOf(remoteListing).trim()).toBe(String(files.length));
+
+    const down = path.join(localRoot, 'large-tree-download');
+    const downloadStart = Date.now();
+    const download = await withRetry('download large tree', () =>
+      sshDownload(
+        { host: ALIAS, remote_path: remoteTree, local_path: down, recursive: true },
+        ctx,
+      ),
+    );
+    const downloadMs = Date.now() - downloadStart;
+    console.log(
+      `[e2e large dir] download ms=${downloadMs} total ms=${uploadMs + downloadMs} bytes=${totalBytes}`,
+    );
+    expect(download.isError, textOf(download)).not.toBe(true);
+    expect(structured(download)['kind']).toBe('directory');
+    expect(structured(download)['file_count']).toBe(files.length);
+    for (const file of files) {
+      expect(sha256(await fs.readFile(path.join(down, ...file.rel.split('/'))))).toBe(file.sha);
+    }
+  }, TEST_TIMEOUT_MS);
+
   it('round-trips a filename containing spaces and CJK characters', async () => {
     const name = '空格 中文.txt';
     const content = 'name roundtrip 中文\n';

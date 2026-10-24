@@ -3,6 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  ARCHIVE_STREAM_MAX_BYTES,
+  archiveStreamLimit,
   assertDepth,
   assertFileCount,
   assertFileSize,
@@ -73,6 +75,37 @@ describe('file-policy', () => {
     expect(() => assertTransferEnabled({ localRoots: [] })).toThrow(
       expect.objectContaining({ code: 'transfer_disabled' }),
     );
+  });
+
+  describe('archiveStreamLimit', () => {
+    const MIB = 1024 * 1024;
+
+    it('adds per-entry and fixed tar overhead to max_total_bytes', () => {
+      expect(archiveStreamLimit(LIMITS)).toBe(10_000_000 + 100 * 1024 + 64 * MIB);
+    });
+
+    it('matches the production defaults (4 GiB / 10000 entries)', () => {
+      expect(
+        archiveStreamLimit({ maxFiles: 10_000, maxTotalBytes: 4 * 1024 * MIB }),
+      ).toBe(4 * 1024 * MIB + 10_000 * 1024 + 64 * MIB);
+    });
+
+    it('allows exactly 8 GiB and caps anything above it', () => {
+      const atCap = { maxTotalBytes: 8 * 1024 * MIB - 64 * MIB - 1024 * 1024, maxFiles: 1024 };
+      expect(archiveStreamLimit(atCap)).toBe(ARCHIVE_STREAM_MAX_BYTES);
+      expect(archiveStreamLimit({ maxFiles: 1, maxTotalBytes: 8 * 1024 * MIB })).toBe(
+        ARCHIVE_STREAM_MAX_BYTES,
+      );
+      expect(
+        archiveStreamLimit({ maxFiles: Number.MAX_SAFE_INTEGER, maxTotalBytes: Number.MAX_SAFE_INTEGER }),
+      ).toBe(ARCHIVE_STREAM_MAX_BYTES);
+    });
+
+    it('always returns a safe integer', () => {
+      const value = archiveStreamLimit({ maxFiles: 10_000, maxTotalBytes: 4 * 1024 * MIB });
+      expect(Number.isSafeInteger(value)).toBe(true);
+      expect(value).toBeGreaterThan(1024 * 1024);
+    });
   });
 });
 

@@ -15,6 +15,7 @@ import { createCleanupTracker } from './cleanup.js';
 import { runRemoteCommand, type TransferDeps } from './deps.js';
 import { classifyTransportRun, internalFailure, policyFailure } from './errors.js';
 import {
+  archiveStreamLimit,
   assertFileCount,
   assertFileSize,
   assertTotalBytes,
@@ -247,10 +248,13 @@ export async function uploadTree(input: UploadTreeInput): Promise<TransferFacts>
 
     const archive = newLocalTempPath(os.tmpdir(), 'upload-archive');
     cleanup.addLocal(archive);
+    // 归档体积含 tar 头/块开销，可能超过 max_total_bytes：使用归档专用上限，
+    // 否则 stdoutFile 写盘会在 1 MiB 处杀进程并留下截断归档。
     const createRun = await createLocalArchive({
       source: local.realPath,
       archive,
       contents: true,
+      maxOutputBytes: archiveStreamLimit(deps.limits),
       ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
     });
     lastRun = createRun;
@@ -447,6 +451,8 @@ export async function downloadTree(input: DownloadTreeInput): Promise<TransferFa
     const createCommand = `tar -C ${renderRemoteShellPath(absolute)} -cf - .`;
     const createRun = await runRemoteTar(deps, createCommand, {
       stdoutFile: archive,
+      // stdoutFile 直接写盘；必须用归档上限，不能落到 defaults.max_output_bytes（1 MiB）。
+      maxOutputBytes: archiveStreamLimit(deps.limits),
       ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
       label: `download-tar:${deps.target.host.alias}`,
     });
