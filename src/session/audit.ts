@@ -100,6 +100,8 @@ export interface SessionCloseAuditInput {
   signal?: string | null;
   graceful?: boolean;
   killed?: boolean;
+  /** 关闭原因（explicit / idle_timeout / command_timeout / protocol_error / ...）。 */
+  reason?: string;
   failure?: SessionAuditFailure;
   timestamp?: string;
 }
@@ -120,6 +122,7 @@ export interface SessionCloseAuditRecord {
   signal: string | null;
   graceful: boolean;
   killed: boolean;
+  reason?: string;
   outcome: SessionAuditOutcome;
   failureCode?: string;
   failureKind?: string;
@@ -184,8 +187,31 @@ export function buildSessionSendAudit(input: SessionSendAuditInput): SessionSend
   return record;
 }
 
+/**
+ * close 的 outcome：显式关闭为 ok；超时/协议/传输错误沿用 send 的词汇；
+ * idle/shutdown 是正常的生命周期结束，记为 closed。
+ */
 export function deriveSessionCloseOutcome(input: SessionCloseAuditInput): SessionAuditOutcome {
-  return input.failure !== undefined ? 'failed' : 'ok';
+  if (input.failure !== undefined) {
+    if (input.failure.kind === 'Policy') return 'denied';
+    if (input.failure.kind === 'Timeout') return 'timeout';
+    return 'error';
+  }
+  switch (input.reason) {
+    case 'idle_timeout':
+    case 'shutdown':
+      return 'closed';
+    case 'command_timeout':
+      return 'timeout';
+    case 'protocol_error':
+    case 'transport_exit':
+    case 'transport_error':
+      return 'error';
+    case 'trust_revoked':
+      return 'denied';
+    default:
+      return 'ok';
+  }
 }
 
 export function buildSessionCloseAudit(input: SessionCloseAuditInput): SessionCloseAuditRecord {
@@ -207,6 +233,7 @@ export function buildSessionCloseAudit(input: SessionCloseAuditInput): SessionCl
   if (input.destination !== undefined) record.destination = input.destination;
   if (input.cwd !== undefined) record.cwd = input.cwd;
   if (input.durationMs !== undefined) record.durationMs = input.durationMs;
+  if (input.reason !== undefined) record.reason = input.reason;
   if (input.failure?.code !== undefined) record.failureCode = input.failure.code;
   if (input.failure?.kind !== undefined) record.failureKind = input.failure.kind;
   return record;

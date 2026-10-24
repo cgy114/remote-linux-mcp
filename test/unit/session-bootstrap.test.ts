@@ -2,7 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { renderCwd, renderEnvExports } from '../../src/policy/remote-command.js';
 import { buildSessionBootstrap } from '../../src/policy/session.js';
-import { createNonce } from '../../src/session/frame.js';
+import { createFrameParser, createNonce } from '../../src/session/frame.js';
+import type { Frame, FrameEvent } from '../../src/session/types.js';
 
 const NONCE = '0123456789abcdef0123456789abcdef';
 
@@ -18,6 +19,36 @@ const bashAvailable = (() => {
     return false;
   }
 })();
+
+/** 用真实 bash 跑一遍 bootstrap，并通过协议行驱动命令，返回解析后的帧与用户输出。 */
+function runBootstrap(protocol: string): {
+  frames: Frame[];
+  data: Buffer;
+  status: number | null;
+  stderr: string;
+} {
+  const script = scriptOf(
+    buildSessionBootstrap({ nonce: NONCE, cwdExpr: renderCwd('~'), envLines: [] }),
+  );
+  const r = spawnSync('bash', ['--noprofile', '--norc', '-c', script], {
+    input: protocol,
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  const parser = createFrameParser(NONCE);
+  const result = parser.push(r.stdout ?? Buffer.alloc(0));
+  const events: FrameEvent[] = [...result.events, ...parser.flush()];
+  return {
+    frames: events
+      .filter((event) => event.type === 'frame')
+      .map((event) => (event as { frame: Frame }).frame),
+    data: Buffer.concat(
+      events.filter((event) => event.type === 'data').map((event) => (event as { buf: Buffer }).buf),
+    ),
+    status: r.status,
+    stderr: (r.stderr ?? Buffer.alloc(0)).toString('utf8'),
+  };
+}
 
 describe('buildSessionBootstrap', () => {
   const lines = buildSessionBootstrap({
@@ -65,6 +96,16 @@ describe('buildSessionBootstrap', () => {
     expect(script).toContain('RMCP_PAYLOAD=${RMCP_LINE#* }');
   });
 
+  it('disables errexit around every command and re-anchors fds before E', () => {
+    const evalIdx = lines.findIndex((line) => line.includes('eval "$(builtin printf %b'));
+    expect(evalIdx).toBeGreaterThan(0);
+    expect(lines[evalIdx - 1]).toBe('  set +e');
+    expect(lines[evalIdx + 1]).toBe('  RMCP_RC=$?');
+    expect(lines[evalIdx + 2]).toBe('  exec 1>&3 2>&3');
+    expect(lines[evalIdx + 3]).toBe('  set +e');
+    expect(lines[evalIdx + 4]).toContain('E:%s:%s');
+  });
+
   it('handles the Q close line by leaving the loop', () => {
     expect(lines).toContain('  case "$RMCP_SEQ" in');
     expect(lines).toContain('    Q) break ;;');
@@ -95,7 +136,7 @@ describe('buildSessionBootstrap', () => {
 
   it('accepts an empty env block', () => {
     const bare = buildSessionBootstrap({ nonce: NONCE, cwdExpr: renderCwd('/'), envLines: [] });
-    expect(bare).toHaveLength(17);
+    expect(bare).toHaveLength(20);
     expect(bare.every((line) => !line.startsWith('export '))).toBe(true);
   });
 
@@ -146,5 +187,35 @@ describe('buildSessionBootstrap', () => {
     const r = spawnSync('bash', ['-n', '-c', script], { timeout: 5000, windowsHide: true });
     expect(r.error).toBeUndefined();
     expect(r.status, r.stderr.toString()).toBe(0);
+  });
+
+  it.skipIf(!bashAvailable)('keeps the loop alive when a command enables errexit', () => {
+    const run = runBootstrap('1 set -e\n2 false\n3 echo hello\nQ\n');
+    expect(run.status, run.stderr).toBe(0);
+
+    const ends = run.frames.filter(
+      (frame): frame is Extract<Frame, { type: 'E' }> => frame.type === 'E',
+    );
+    // set -e 生效后，下一条 false 的 rc=1 仍应被上报，循环继续执行 seq=3。
+    expect(ends).toEqual([
+      { type: 'E', seq: 1, rc: 0 },
+      { type: 'E', seq: 2, rc: 1 },
+      { type: 'E', seq: 3, rc: 0 },
+    ]);
+    expect(run.data.toString()).toContain('hello\n');
+  });
+
+  it.skipIf(!bashAvailable)('re-anchors stdout and stderr after a command redirects them', () => {
+    const run = runBootstrap('1 exec >/tmp/x 2>&1\n2 echo hello\nQ\n');
+    expect(run.status, run.stderr).toBe(0);
+
+    const ends = run.frames.filter(
+      (frame): frame is Extract<Frame, { type: 'E' }> => frame.type === 'E',
+    );
+    expect(ends).toEqual([
+      { type: 'E', seq: 1, rc: 0 },
+      { type: 'E', seq: 2, rc: 0 },
+    ]);
+    expect(run.data.toString()).toContain('hello\n');
   });
 });

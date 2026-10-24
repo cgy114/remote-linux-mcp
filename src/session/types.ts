@@ -32,6 +32,11 @@ export interface FrameParseResult {
 /** 增量帧解析器；`push` 可接收任意切分的字节片段。 */
 export interface FrameParser {
   push(chunk: Buffer | Uint8Array): FrameParseResult;
+  /**
+   * 输入结束（EOF）时调用：把尚未消费的 carry 作为 data 吐出并清空。
+   * 解析器已处于错误态时返回空数组（错误已经上报过）。
+   */
+  flush(): FrameEvent[];
   /** 已发生的致命解析错误；进入失败态后 push 只返回该错误。 */
   readonly failed: FrameParseErrorCode | undefined;
 }
@@ -95,6 +100,8 @@ export interface CloseFacts {
   /** 是否需要本地强杀进程树。 */
   killed: boolean;
   duration_ms: number;
+  /** 关闭原因：explicit / idle_timeout / command_timeout / protocol_error / transport_exit / shutdown / trust_revoked。 */
+  reason: string;
 }
 
 /** 会话生命周期状态。 */
@@ -113,5 +120,4 @@ export interface Snapshot {
   commands_run: number;
   output_bytes: number;
   truncated: boolean;
-  close?: CloseFacts;
 }

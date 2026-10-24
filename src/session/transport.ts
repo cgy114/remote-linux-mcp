@@ -12,8 +12,8 @@ import {
   LOCAL_STDERR_BYTES,
   PRE_RDY_DIAGNOSTIC_BYTES,
 } from './constants.js';
-import { createFrameParser } from './frame.js';
-import type { FrameEvent, FrameParseErrorCode } from './types.js';
+import { createFrameParser, encodeCloseLine } from './frame.js';
+import type { FrameEvent, FrameParseErrorCode, FrameParseResult } from './types.js';
 
 const IS_WIN = process.platform === 'win32';
 const KILL_SETTLE_MS = 1000;
@@ -406,10 +406,14 @@ async function openSessionTransportImpl(opts: OpenSessionTransportOptions): Prom
       let killed = false;
       try {
         if (exited) {
-          graceful = true;
+          // close() 之前子进程已经退出：没有写入 Q，也不算优雅关闭；
+          // exit_code/signal 保持 markExited 记录的真实值。
+          graceful = false;
         } else {
+          let closeWritten = false;
           try {
-            await writeRaw('Q\n');
+            await writeRaw(encodeCloseLine());
+            closeWritten = true;
           } catch {
             // 子进程可能已经退出；继续等待/强杀
           }
@@ -418,10 +422,12 @@ async function openSessionTransportImpl(opts: OpenSessionTransportOptions): Prom
           } catch {
             // 已关闭
           }
-          graceful = await Promise.race([
-            exitedPromise.then(() => true),
-            delay(closeGraceMs).then(() => false),
-          ]);
+          graceful =
+            closeWritten &&
+            (await Promise.race([
+              exitedPromise.then(() => true),
+              delay(closeGraceMs).then(() => false),
+            ]));
         }
         if (!exited) {
           killed = true;
@@ -443,9 +449,7 @@ async function openSessionTransportImpl(opts: OpenSessionTransportOptions): Prom
       markExited(code, sig);
     });
 
-    stdout.on('data', (chunk: Buffer) => {
-      if (shuttingDown) return;
-      const result = parser.push(chunk);
+    const handleParseResult = (result: FrameParseResult): void => {
       for (const event of result.events) {
         if (shuttingDown) return;
         handleEvent(event);
@@ -463,6 +467,17 @@ async function openSessionTransportImpl(opts: OpenSessionTransportOptions): Prom
           dispatch({ type: 'parse_error', error: result.error });
         }
       }
+    };
+
+    stdout.on('data', (chunk: Buffer) => {
+      if (shuttingDown) return;
+      handleParseResult(parser.push(chunk));
+    });
+    // EOF：解析器可能还握着不完整的标记前缀（例如远端在输出中途退出）。
+    // 这些字节是普通数据，必须按当前阶段交付（握手前进诊断，握手后交给 handler）。
+    stdout.on('end', () => {
+      if (shuttingDown) return;
+      handleParseResult({ events: parser.flush() });
     });
     stdout.on('error', () => undefined);
 

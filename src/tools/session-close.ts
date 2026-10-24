@@ -1,16 +1,14 @@
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { buildSessionCloseAudit } from '../session/audit.js';
 import { formatSessionClose } from '../session/format.js';
 import type { Session } from '../session/session.js';
 import {
-  errorToToolError,
   toolErrorResult,
   type ToolContext,
 } from './common.js';
 import {
-  appendSessionAudit,
   requireSession,
+  sessionErrorToToolError,
   sessionRegistry,
 } from './session-common.js';
 
@@ -23,8 +21,9 @@ export const sessionCloseInput = z
 export type SessionCloseInput = z.infer<typeof sessionCloseInput>;
 
 /**
- * session_close：优雅关闭（Q + EOF，宽限期后强杀），从登记簿移除并审计。
- * 幂等：对已关闭的会话再次调用仍返回同一组事实。
+ * session_close：优雅关闭（Q + EOF，宽限期后强杀），从登记簿移除。
+ * close 审计由 createSession 的 onAuditClose 回调统一写入（所有关闭路径恰好一次），
+ * 这里不再重复写。幂等：对已关闭的会话再次调用仍返回同一组事实。
  */
 export async function sessionClose(
   input: SessionCloseInput,
@@ -36,26 +35,6 @@ export async function sessionClose(
     const facts = await session.close('explicit');
     sessionRegistry().delete(session.id);
 
-    const snapshot = session.snapshot();
-    await appendSessionAudit(
-      buildSessionCloseAudit({
-        sessionId: session.id,
-        alias: session.alias,
-        destination: session.destination,
-        cwd: session.cwd,
-        envKeys: session.envKeys,
-        commandsRun: snapshot.commands_run,
-        outputBytes: snapshot.output_bytes,
-        truncated: snapshot.truncated,
-        durationMs: facts.duration_ms,
-        exitCode: facts.exit_code,
-        signal: facts.signal,
-        graceful: facts.graceful,
-        killed: facts.killed,
-      }),
-      ctx,
-    );
-
     return formatSessionClose({
       sessionId: session.id,
       alias: session.alias,
@@ -64,7 +43,7 @@ export async function sessionClose(
     });
   } catch (e) {
     return toolErrorResult(
-      errorToToolError(e, ctx.log),
+      sessionErrorToToolError(e, ctx.log),
       session?.alias,
       'session_close',
     );

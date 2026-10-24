@@ -1,17 +1,21 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { UsageError } from '../../src/errors/classes.js';
 import { createSessionRegistry, type SessionRegistry } from '../../src/session/registry.js';
 import type { Session } from '../../src/session/session.js';
+import { SessionStartError } from '../../src/session/transport.js';
 import type { CloseFacts, SendOutcome, Snapshot } from '../../src/session/types.js';
+import { fingerprintKey } from '../../src/trust/fingerprint.js';
 import { sessionClose, sessionCloseInput } from '../../src/tools/session-close.js';
 import {
   SESSION_CLOSE_ANNOTATIONS,
   SESSION_LIST_ANNOTATIONS,
   SESSION_SEND_ANNOTATIONS,
   SESSION_START_ANNOTATIONS,
+  sessionStartErrorToToolError,
   useSessionRegistry,
 } from '../../src/tools/session-common.js';
 import { sessionList, sessionListInput } from '../../src/tools/session-list.js';
@@ -26,6 +30,7 @@ const CLOSE_FACTS: CloseFacts = {
   graceful: true,
   killed: false,
   duration_ms: 123,
+  reason: 'explicit',
 };
 
 function makeLogger(): Logger {
@@ -166,6 +171,44 @@ async function makeTempDir(): Promise<string> {
   return dir;
 }
 
+/** 写入一组 known_hosts + trust registry fixture。 */
+async function writeTrustFixture(
+  dir: string,
+  knownBlob: string,
+  pinnedBlob: string,
+): Promise<void> {
+  await writeFile(path.join(dir, 'known_hosts'), `127.0.0.1 ssh-ed25519 ${knownBlob}\n`, 'utf8');
+  await writeFile(
+    path.join(dir, 'trust.json'),
+    JSON.stringify({
+      version: 1,
+      hosts: {
+        web1: {
+          algorithm: 'ssh-ed25519',
+          keyBlob: pinnedBlob,
+          fingerprint: fingerprintKey(pinnedBlob),
+          firstSeenAt: '2026-01-01T00:00:00.000Z',
+          lastVerifiedAt: '2026-01-02T00:00:00.000Z',
+        },
+      },
+    }),
+    'utf8',
+  );
+}
+
+async function pinTrust(dir: string): Promise<void> {
+  const blob = Buffer.from('session-tools-known-key').toString('base64');
+  await writeTrustFixture(dir, blob, blob);
+}
+
+async function pinMismatchedTrust(dir: string): Promise<void> {
+  await writeTrustFixture(
+    dir,
+    Buffer.from('session-tools-known-key').toString('base64'),
+    Buffer.from('session-tools-other-pinned-key').toString('base64'),
+  );
+}
+
 beforeEach(() => {
   useSessionRegistry(createSessionRegistry());
 });
@@ -228,6 +271,34 @@ describe('session tool annotations', () => {
   });
 });
 
+describe('session error hints and retryability', () => {
+  it('uses the remote-start hint for early exits and handshake failures', () => {
+    const exited = sessionStartErrorToToolError(
+      new SessionStartError('x', { code: 'session_exited_early', exit_code: 1 }),
+    );
+    expect(exited).toMatchObject({
+      kind: 'Internal',
+      code: 'session_start_failed',
+      retryable: false,
+    });
+    expect(exited.hint).toContain('远端 cwd');
+    expect(exited.hint).toContain('bash');
+    expect(exited.hint).not.toContain('ssh 是否已安装');
+
+    const writeFailed = sessionStartErrorToToolError(
+      new SessionStartError('x', { code: 'session_write_failed' }),
+    );
+    expect(writeFailed.code).toBe('session_start_failed');
+    expect(writeFailed.hint).toContain('远端 cwd');
+
+    // 本地 ssh 无法启动时仍保留本地排查提示。
+    const spawnFailed = sessionStartErrorToToolError(
+      new SessionStartError('x', { code: 'session_spawn_failed' }),
+    );
+    expect(spawnFailed.hint).toContain('ssh 是否已安装');
+  });
+});
+
 describe('session_start', () => {
   it('rejects untrusted hosts before reserving or spawning', async () => {
     const dir = await makeTempDir();
@@ -256,6 +327,33 @@ describe('session_start', () => {
     expect(structured.error.kind).toBe('Policy');
     expect(structured.error.code).toBe('invalid_cwd');
   });
+
+  it('marks too_many_sessions retryable with the queue hint', async () => {
+    const dir = await makeTempDir();
+    const registry = createSessionRegistry({ maxGlobal: 4, maxPerDest: 1 });
+    useSessionRegistry(registry);
+    register(
+      registry,
+      makeFakeSession({ id: 'sess_holder', destination: 'tester@127.0.0.1:22' }),
+    );
+    await pinTrust(dir);
+
+    const result = await sessionStart({ host: 'web1' }, makeCtx(dir, makeConfig(dir)));
+
+    expect(result.isError).toBe(true);
+    const structured = result.structuredContent as {
+      tool: string;
+      error: { kind: string; code: string; retryable: boolean; hint: string };
+    };
+    expect(structured.tool).toBe('session_start');
+    expect(structured.error).toMatchObject({
+      kind: 'Policy',
+      code: 'too_many_sessions',
+      retryable: true,
+    });
+    expect(structured.error.hint).toContain('等待在途命令');
+    expect(registry.size).toBe(1);
+  });
 });
 
 describe('session_send', () => {
@@ -276,10 +374,11 @@ describe('session_send', () => {
         send: async () => ({ outcome, queueMs: 3, sessionQueueMs: 5 }),
       }),
     );
+    await pinTrust(dir);
 
     const result = await sessionSend(
       { session_id: 'sess_fake', command: 'echo hello' },
-      makeCtx(dir),
+      makeCtx(dir, makeConfig(dir)),
     );
 
     expect(result.isError).toBe(false);
@@ -337,17 +436,21 @@ describe('session_send', () => {
       registry,
       makeFakeSession({ send: async () => ({ outcome, queueMs: 0, sessionQueueMs: 0 }) }),
     );
+    await pinTrust(dir);
 
     const result = await sessionSend(
       { session_id: 'sess_fake', command: 'sleep 99' },
-      makeCtx(dir),
+      makeCtx(dir, makeConfig(dir)),
     );
 
     expect(result.isError).toBe(true);
     const structured = result.structuredContent as {
-      error: { kind: string; code: string };
+      error: { kind: string; code: string; retryable: boolean; hint: string };
     };
     expect(structured.error).toMatchObject({ kind: 'Timeout', code: 'session_timeout' });
+    expect(structured.error.retryable).toBe(false);
+    expect(structured.error.hint).toContain('timeout_ms');
+    expect(structured.error.hint).toContain('session_start');
 
     const audit = await readAudit(dir);
     expect(audit[0]).toMatchObject({
@@ -357,10 +460,113 @@ describe('session_send', () => {
       failureCode: 'session_timeout',
     });
   });
+
+  it('maps a closed outcome to Policy with a recreate hint', async () => {
+    const dir = await makeTempDir();
+    const registry = createSessionRegistry();
+    useSessionRegistry(registry);
+    const outcome: SendOutcome = {
+      status: 'closed',
+      seq: 2,
+      output: { text: '', encoding: 'utf-8', truncated: false, bytes: 0 },
+      duration_ms: 1,
+    };
+    register(
+      registry,
+      makeFakeSession({ send: async () => ({ outcome, queueMs: 0, sessionQueueMs: 0 }) }),
+    );
+    await pinTrust(dir);
+
+    const result = await sessionSend(
+      { session_id: 'sess_fake', command: 'true' },
+      makeCtx(dir, makeConfig(dir)),
+    );
+
+    expect(result.isError).toBe(true);
+    const structured = result.structuredContent as {
+      error: { kind: string; code: string; retryable: boolean; hint: string };
+    };
+    expect(structured.error).toMatchObject({
+      kind: 'Policy',
+      code: 'session_closed',
+      retryable: false,
+    });
+    expect(structured.error.hint).toContain('重新创建会话');
+  });
+
+  it('marks session_busy retryable with the queue hint', async () => {
+    const dir = await makeTempDir();
+    const registry = createSessionRegistry();
+    useSessionRegistry(registry);
+    register(
+      registry,
+      makeFakeSession({
+        send: async () => {
+          throw new UsageError('queue full', { code: 'session_busy' });
+        },
+      }),
+    );
+    await pinTrust(dir);
+
+    const result = await sessionSend(
+      { session_id: 'sess_fake', command: 'true' },
+      makeCtx(dir, makeConfig(dir)),
+    );
+
+    expect(result.isError).toBe(true);
+    const structured = result.structuredContent as {
+      error: { kind: string; code: string; retryable: boolean; hint: string };
+    };
+    expect(structured.error).toMatchObject({
+      kind: 'Policy',
+      code: 'session_busy',
+      retryable: true,
+    });
+    expect(structured.error.hint).toContain('等待在途命令');
+  });
+
+  it('re-checks trust before sending: revocation closes the session without sending', async () => {
+    const dir = await makeTempDir();
+    const registry = createSessionRegistry();
+    useSessionRegistry(registry);
+    let sendCalls = 0;
+    const closeReasons: string[] = [];
+    register(
+      registry,
+      makeFakeSession({
+        send: async () => {
+          sendCalls += 1;
+          throw new Error('send must not be called after trust revocation');
+        },
+        close: async (reason) => {
+          closeReasons.push(reason ?? '');
+          return { ...CLOSE_FACTS, reason: reason ?? 'explicit' };
+        },
+      }),
+    );
+    await pinMismatchedTrust(dir);
+
+    const result = await sessionSend(
+      { session_id: 'sess_fake', command: 'echo hi' },
+      makeCtx(dir, makeConfig(dir)),
+    );
+
+    expect(result.isError).toBe(true);
+    const structured = result.structuredContent as {
+      tool: string;
+      error: { kind: string; code: string };
+    };
+    expect(structured.tool).toBe('session_send');
+    expect(structured.error.kind).toBe('HostKey');
+    expect(sendCalls).toBe(0);
+    expect(closeReasons).toEqual(['trust_revoked']);
+    expect(registry.get('sess_fake')).toBeUndefined();
+    expect(await readAudit(dir)).toHaveLength(0);
+  });
 });
 
 describe('session_close', () => {
-  it('closes, removes from the registry and audits the facts', async () => {
+  it('closes, removes from the registry, and leaves auditing to onAuditClose', async () => {
     const dir = await makeTempDir();
     const registry = createSessionRegistry();
     useSessionRegistry(registry);
@@ -389,13 +595,8 @@ describe('session_close', () => {
     expect(reasons).toEqual(['explicit']);
     expect(registry.get('sess_fake')).toBeUndefined();
 
-    const audit = await readAudit(dir);
-    expect(audit[0]).toMatchObject({
-      tool: 'session_close',
-      session_id: 'sess_fake',
-      outcome: 'ok',
-      graceful: true,
-    });
+    // 显式关闭的审计由 createSession 的 onAuditClose 统一写入，工具不得重复写。
+    expect(await readAudit(dir)).toHaveLength(0);
   });
 
   it('reports unknown sessions as Policy', async () => {
@@ -461,6 +662,23 @@ describe('session_list', () => {
     }
     expect(JSON.stringify(structured)).not.toContain('nonce');
     expect(await readAudit(dir)).toHaveLength(0);
+  });
+
+  it('never renders a close field or closed marker for active sessions', async () => {
+    const dir = await makeTempDir();
+    const registry = createSessionRegistry();
+    useSessionRegistry(registry);
+    register(registry, makeFakeSession({ id: 'sess_active' }));
+
+    const result = await sessionList({}, makeCtx(dir));
+
+    expect(result.isError).toBe(false);
+    const structured = result.structuredContent as {
+      sessions: Array<Record<string, unknown>>;
+    };
+    expect(structured.sessions[0]).not.toHaveProperty('close');
+    const text = result.content?.[0]?.type === 'text' ? result.content[0].text : '';
+    expect(text).not.toContain('closed');
   });
 
   it('reports an empty registry', async () => {

@@ -3,6 +3,7 @@ import {
   buildSessionCloseAudit,
   buildSessionSendAudit,
   buildSessionStartAudit,
+  deriveSessionCloseOutcome,
   deriveSessionSendOutcome,
 } from '../../src/session/audit.js';
 
@@ -125,5 +126,25 @@ describe('session audit builders', () => {
       outcome: 'ok',
     });
     expect(JSON.stringify(record)).not.toContain('secret');
+  });
+
+  it('records the close reason and derives self-close outcomes', () => {
+    const cases: Array<[string, string]> = [
+      ['explicit', 'ok'],
+      ['idle_timeout', 'closed'],
+      ['shutdown', 'closed'],
+      ['command_timeout', 'timeout'],
+      ['protocol_error', 'error'],
+      ['transport_exit', 'error'],
+      ['trust_revoked', 'denied'],
+    ];
+    for (const [reason, outcome] of cases) {
+      expect(deriveSessionCloseOutcome({ sessionId: 's', reason })).toBe(outcome);
+      expect(buildSessionCloseAudit({ sessionId: 's', reason })).toMatchObject({
+        tool: 'session_close',
+        reason,
+        outcome,
+      });
+    }
   });
 });

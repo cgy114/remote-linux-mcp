@@ -141,7 +141,6 @@ export function formatSessionList(entries: readonly SessionListEntry[]): CallToo
         commands_run: snapshot.commands_run,
         output_bytes: snapshot.output_bytes,
         truncated: snapshot.truncated,
-        ...(snapshot.close !== undefined ? { close: snapshot.close } : {}),
       };
     }),
   };
@@ -155,7 +154,7 @@ export function formatSessionList(entries: readonly SessionListEntry[]): CallToo
     return (
       `${entry.sessionId} ${entry.alias} ${entry.destination} state=${s.state} ` +
       `queue=${s.queue_depth} commands=${s.commands_run} output_bytes=${s.output_bytes}` +
-      `${s.truncated ? ' truncated' : ''}${s.close !== undefined ? ' closed' : ''}`
+      `${s.truncated ? ' truncated' : ''}`
     );
   });
   return successResult(lines.join('\n'), structured);

@@ -4,16 +4,16 @@ import { sha256Hex } from '../audit/audit.js';
 import { buildSessionSendAudit } from '../session/audit.js';
 import { formatSessionSend } from '../session/format.js';
 import { validateSessionSendInput as validateSendInput } from '../policy/session.js';
+import { resolveTarget } from '../pipeline/target.js';
+import { checkTrust, trustFactToToolError } from '../pipeline/trust.js';
 import type { Session } from '../session/session.js';
-import {
-  errorToToolError,
-  toolErrorResult,
-  type ToolContext,
-} from './common.js';
+import { toolErrorResult, type ToolContext } from './common.js';
 import {
   appendSessionAudit,
   requireSession,
   sendOutcomeToToolError,
+  sessionErrorToToolError,
+  sessionRegistry,
 } from './session-common.js';
 
 export const sessionSendInput = z
@@ -39,6 +39,23 @@ export async function sessionSend(
   try {
     session = requireSession(input.session_id);
     validateSendInput(input);
+
+    // 会话可能存活很久：发送前用会话保存的 alias 重新解析目标并复查信任，
+    // 防止密钥被轮换/撤销后仍通过旧会话执行命令。
+    const target = await resolveTarget({ host: session.alias }, ctx);
+    const trust = await checkTrust({
+      alias: target.host.alias,
+      host: target.host,
+      paths: ctx.paths,
+      log: ctx.log,
+    });
+    if (!trust.ok) {
+      const error = trustFactToToolError(trust.fact, ctx.log);
+      await session.close('trust_revoked');
+      // addClosedListener 通常已经移除；这里显式删除保证立即释放名额。
+      sessionRegistry().delete(session.id);
+      return toolErrorResult(error, session.alias, 'session_send');
+    }
 
     const result = await session.send({
       command: input.command,
@@ -103,7 +120,7 @@ export async function sessionSend(
     });
   } catch (e) {
     return toolErrorResult(
-      errorToToolError(e, ctx.log),
+      sessionErrorToToolError(e, ctx.log),
       session?.alias,
       'session_send',
     );

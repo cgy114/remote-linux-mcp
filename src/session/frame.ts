@@ -179,8 +179,21 @@ export function createFrameParser(nonce: string): FrameParser {
     return { events };
   };
 
+  /** EOF：把 carry（可能是不完整的标记前缀）作为普通数据交出并清空。 */
+  const flush = (): FrameEvent[] => {
+    if (failed !== undefined) {
+      carry = Buffer.alloc(0);
+      return [];
+    }
+    if (carry.length === 0) return [];
+    const buf = Buffer.from(carry);
+    carry = Buffer.alloc(0);
+    return [{ type: 'data', buf }];
+  };
+
   return {
     push,
+    flush,
     get failed(): FrameParseErrorCode | undefined {
       return failed;
     },

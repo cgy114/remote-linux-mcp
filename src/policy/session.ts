@@ -115,6 +115,10 @@ export function validateSessionSendInput(input: SessionSendInput): void {
  * - 每条命令以 `<seq> <encodeScript payload>` 一行送入 stdin，用
  *   `builtin printf %b` 还原后 eval；eval 的 stdin 指向 /dev/null，
  *   不会抢走协议行；
+ * - eval 前后都 `set +e`：用户命令里的 errexit 不会终止会话循环，也不会
+ *   让非零退出码跳过 E 帧；
+ * - eval 后立即 `exec 1>&3 2>&3` 重新锚定 fd1/fd2，用户命令的
+ *   `exec >file` 只影响该条命令，不会吞掉后续输出/帧；
  * - 收到 `Q` 时跳出循环，最终把 fd1/fd2 恢复到 channel。
  *
  * 所有 printf 均使用 builtin，变量名固定为 RMCP_*，因此用户 env 无法劫持
@@ -152,8 +156,15 @@ export function buildSessionBootstrap(input: SessionBootstrapInput): string[] {
     '    Q) break ;;',
     '  esac',
     `  builtin printf '\\036RMCP%s:B:%s\\037' "$RMCP_NONCE" "$RMCP_SEQ" >&3`,
+    // 每条命令都从非 errexit 状态开始：用户上一条命令里的 `set -e` 不应让
+    // 下一条命令的非零退出码直接终止会话循环。
+    '  set +e',
     '  eval "$(builtin printf %b "$RMCP_PAYLOAD")" </dev/null',
     '  RMCP_RC=$?',
+    // 用户命令可能重定向了 fd1/fd2；先恢复协议通道，再写 E 帧与后续输出。
+    '  exec 1>&3 2>&3',
+    // 命令本身可能刚开启 errexit，写帧前再关一次。
+    '  set +e',
     `  builtin printf '\\036RMCP%s:E:%s:%s\\037' "$RMCP_NONCE" "$RMCP_SEQ" "$RMCP_RC" >&3`,
     'done',
     'exec 1>&3 2>&3',

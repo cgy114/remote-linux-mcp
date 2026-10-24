@@ -62,8 +62,6 @@ export interface Session {
 
 export interface CreateSessionOptions {
   id: SessionId;
-  /** 会话 nonce（由调用方生成；传输层握手时消费，状态机本身不再使用）。 */
-  nonce?: string;
   target: SessionTarget;
   transport: SessionTransport;
   cwd: string;
@@ -85,6 +83,12 @@ export interface CreateSessionOptions {
    * protocol_error、transport_exit）。幂等；异常被吞掉并记录 warn。
    */
   onClosed?: (sessionId: SessionId) => void;
+  /**
+   * 会话进入 closed 后调用一次（所有路径：显式 close、idle、timeout、
+   * protocol_error、transport_exit、shutdown）。在 notifyClosed 之后调用；
+   * 返回的 Promise 会被 await，异常被吞掉并记录 warn。
+   */
+  onAuditClose?: (facts: CloseFacts) => void | Promise<void>;
 }
 
 interface QueueEntry {
@@ -154,6 +158,7 @@ export function createSession(opts: CreateSessionOptions): Session {
   let outputBytes = 0;
   let truncatedAny = false;
   let closedNotified = false;
+  let auditCloseNotified = false;
   const closedListeners: Array<(sessionId: SessionId) => void> = [];
   if (opts.onClosed !== undefined) closedListeners.push(opts.onClosed);
 
@@ -177,6 +182,24 @@ export function createSession(opts: CreateSessionOptions): Session {
     if (closedNotified) return;
     closedNotified = true;
     for (const listener of closedListeners) invokeClosedListener(listener);
+  };
+
+  /** 关闭审计回调：notifyClosed 之后恰好一次；异常只记 warn。 */
+  const notifyAuditClose = async (facts: CloseFacts): Promise<void> => {
+    if (opts.onAuditClose === undefined || auditCloseNotified) return;
+    auditCloseNotified = true;
+    try {
+      await opts.onAuditClose(facts);
+    } catch (err) {
+      try {
+        log.warn(
+          { err: err instanceof Error ? err.message : String(err) },
+          'session onAuditClose callback failed',
+        );
+      } catch {
+        // 日志失败不影响关闭
+      }
+    }
   };
 
   const clearIdle = (): void => {
@@ -444,7 +467,7 @@ export function createSession(opts: CreateSessionOptions): Session {
     return closePromise;
   };
 
-  async function performClose(_reason: string): Promise<CloseFacts> {
+  async function performClose(reason: string): Promise<CloseFacts> {
     const lifetime = Date.now() - createdAt;
     if (state === 'closed' && closeFacts !== undefined) return closeFacts;
     state = 'closing';
@@ -483,10 +506,12 @@ export function createSession(opts: CreateSessionOptions): Session {
       graceful: transportFacts.graceful,
       killed: transportFacts.killed,
       duration_ms: lifetime,
+      reason,
     };
     state = 'closed';
     lastActivity = Date.now();
     notifyClosed();
+    await notifyAuditClose(closeFacts);
     return closeFacts;
   }
 
@@ -516,7 +541,7 @@ export function createSession(opts: CreateSessionOptions): Session {
       return state;
     },
     snapshot(): Snapshot {
-      const snapshot: Snapshot = {
+      return {
         id,
         destination: target.destination,
         state,
@@ -528,8 +553,6 @@ export function createSession(opts: CreateSessionOptions): Session {
         output_bytes: outputBytes,
         truncated: truncatedAny,
       };
-      if (closeFacts !== undefined) snapshot.close = closeFacts;
-      return snapshot;
     },
     send,
     close,

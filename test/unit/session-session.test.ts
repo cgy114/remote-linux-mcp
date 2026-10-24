@@ -1,4 +1,9 @@
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { appendAudit } from '../../src/audit/audit.js';
+import { buildSessionCloseAudit } from '../../src/session/audit.js';
 import { createSessionRegistry } from '../../src/session/registry.js';
 import { createSession, type CreateSessionOptions, type Session } from '../../src/session/session.js';
 import type {
@@ -6,6 +11,7 @@ import type {
   TransportCloseFacts,
   TransportEvent,
 } from '../../src/session/transport.js';
+import type { CloseFacts } from '../../src/session/types.js';
 import type { Logger } from '../../src/types.js';
 
 function makeLogger(): Logger {
@@ -265,8 +271,10 @@ describe('createSession close semantics', () => {
     expect(transport.closeCalls).toBe(1);
     expect(await session.close('again')).toBe(facts);
     expect(transport.closeCalls).toBe(1);
+    expect(facts.reason).toBe('explicit');
     expect(session.state).toBe('closed');
-    expect(session.snapshot().close).toEqual(facts);
+    // 无 tombstone：snapshot 不再暴露 close 事实。
+    expect(session.snapshot()).not.toHaveProperty('close');
   });
 
   it('holds the host lease only while a command is executing', async () => {
@@ -390,6 +398,187 @@ describe('createSession closed notification', () => {
 
     await expect(session.close()).resolves.toBeDefined();
     expect(session.state).toBe('closed');
+  });
+});
+
+describe('createSession close audit callback', () => {
+  it('calls onAuditClose exactly once with the explicit reason', async () => {
+    const calls: CloseFacts[] = [];
+    const { session } = makeSession({
+      onAuditClose: (facts) => {
+        calls.push(facts);
+      },
+    });
+
+    await session.close('explicit');
+    await session.close('again');
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ reason: 'explicit', graceful: true });
+  });
+
+  it('reports idle_timeout', async () => {
+    const reasons: string[] = [];
+    makeSession({
+      idleTimeoutMs: 10,
+      onAuditClose: (facts) => {
+        reasons.push(facts.reason);
+      },
+    });
+
+    await until(() => reasons.length === 1);
+    expect(reasons).toEqual(['idle_timeout']);
+  });
+
+  it('reports command_timeout', async () => {
+    const reasons: string[] = [];
+    const { session, transport } = makeSession({
+      defaultTimeoutMs: 10,
+      onAuditClose: (facts) => {
+        reasons.push(facts.reason);
+      },
+    });
+
+    const pending = session.send({ command: 'sleep 999' });
+    await until(() => transport.written.length === 1);
+    expect((await pending).outcome.status).toBe('timeout');
+
+    await until(() => reasons.length === 1);
+    expect(reasons).toEqual(['command_timeout']);
+  });
+
+  it('reports protocol_error', async () => {
+    const reasons: string[] = [];
+    const { session, transport } = makeSession({
+      onAuditClose: (facts) => {
+        reasons.push(facts.reason);
+      },
+    });
+
+    const pending = session.send({ command: 'x' });
+    await until(() => transport.written.length === 1);
+    transport.emit({ type: 'frame', frame: { type: 'E', seq: 1, rc: 0 } });
+    await pending;
+
+    await until(() => reasons.length === 1);
+    expect(reasons).toEqual(['protocol_error']);
+  });
+
+  it('reports transport_exit', async () => {
+    const reasons: string[] = [];
+    const { transport } = makeSession({
+      onAuditClose: (facts) => {
+        reasons.push(facts.reason);
+      },
+    });
+
+    transport.die(255);
+    await until(() => reasons.length === 1);
+    expect(reasons).toEqual(['transport_exit']);
+  });
+
+  it('swallows callback rejections and still closes', async () => {
+    const { session } = makeSession({
+      onAuditClose: async () => {
+        throw new Error('audit backend down');
+      },
+    });
+
+    await expect(session.close('explicit')).resolves.toMatchObject({ reason: 'explicit' });
+    expect(session.state).toBe('closed');
+  });
+});
+
+describe('createSession self-close audits', () => {
+  it('writes exactly one close audit with reason/outcome for every close path', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'remote-mcp-session-audit-'));
+    const file = path.join(dir, 'audit.jsonl');
+    let writes = 0;
+
+    const makeAudited = (
+      id: string,
+      overrides: Partial<CreateSessionOptions> = {},
+    ): { session: Session; transport: FakeTransport } =>
+      makeSession({
+        id,
+        ...overrides,
+        onAuditClose: async (facts) => {
+          await appendAudit(
+            buildSessionCloseAudit({
+              sessionId: id,
+              reason: facts.reason,
+              durationMs: facts.duration_ms,
+              exitCode: facts.exit_code,
+              signal: facts.signal,
+              graceful: facts.graceful,
+              killed: facts.killed,
+            }),
+            { file, log: makeLogger() },
+          );
+          writes += 1;
+        },
+      });
+
+    try {
+      // idle
+      makeAudited('sess_audit_idle', { idleTimeoutMs: 10 });
+      await until(() => writes === 1);
+
+      // command timeout
+      const timed = makeAudited('sess_audit_timeout', { defaultTimeoutMs: 10 });
+      const pendingTimeout = timed.session.send({ command: 'sleep 999' });
+      await until(() => timed.transport.written.length === 1);
+      expect((await pendingTimeout).outcome.status).toBe('timeout');
+      await until(() => writes === 2);
+
+      // protocol error
+      const protocol = makeAudited('sess_audit_protocol');
+      const pendingProtocol = protocol.session.send({ command: 'x' });
+      await until(() => protocol.transport.written.length === 1);
+      protocol.transport.emit({ type: 'frame', frame: { type: 'E', seq: 1, rc: 0 } });
+      await pendingProtocol;
+      await until(() => writes === 3);
+
+      // transport exit
+      const exited = makeAudited('sess_audit_exit');
+      exited.transport.die(255);
+      await until(() => writes === 4);
+
+      // explicit close, exactly once even if close() is called again
+      const explicit = makeAudited('sess_audit_explicit');
+      await explicit.session.close('explicit');
+      expect(writes).toBe(5);
+      await explicit.session.close('again');
+      expect(writes).toBe(5);
+
+      const records = (await readFile(file, 'utf8'))
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+      expect(records).toHaveLength(5);
+      expect(records.map((record) => record['reason'])).toEqual([
+        'idle_timeout',
+        'command_timeout',
+        'protocol_error',
+        'transport_exit',
+        'explicit',
+      ]);
+      expect(records.map((record) => record['outcome'])).toEqual([
+        'closed',
+        'timeout',
+        'error',
+        'error',
+        'ok',
+      ]);
+      for (const record of records) {
+        expect(record['tool']).toBe('session_close');
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(
+        () => undefined,
+      );
+    }
   });
 });
 

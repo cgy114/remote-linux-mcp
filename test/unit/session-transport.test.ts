@@ -174,15 +174,45 @@ describe.skipIf(!bashAvailable)('openSessionTransport (local bash via spawnOverr
     const first = await runCommand(transport, router, 1, 'exec >/dev/null');
     expect(first.rc).toBe(0);
 
-    const second = await runCommand(transport, router, 2, 'echo hidden');
+    // 每条命令结束后 bootstrap 都会把 fd1/fd2 重新锚回协议通道，
+    // 因此上一条命令的 `exec >/dev/null` 不会吞掉下一条命令的输出。
+    const second = await runCommand(transport, router, 2, 'echo visible-again');
     expect(second.rc).toBe(0);
-    expect(second.output).toBe('');
+    expect(second.output).toBe('visible-again\n');
 
     const third = await runCommand(transport, router, 3, 'echo visible >&3');
     expect(third.rc).toBe(0);
     expect(third.output).toContain('visible');
 
     await transport.close();
+  });
+
+  it('flushes a trailing partial prefix into pre-RDY diagnostics on EOF', async () => {
+    const error = await open({
+      handshakeTimeoutMs: 5000,
+      spawnOverride: {
+        file: 'bash',
+        argv: ['--noprofile', '--norc', '-c', "printf 'hello\\036'; sleep 0.3; exit 0"],
+      },
+    }).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(SessionStartError);
+    const startError = error as SessionStartError;
+    expect(startError.code).toBe('session_exited_early');
+    // 末尾的 RS 是不完整标记前缀；没有 flush 时会被静默丢弃。
+    expect(startError.facts.pre_rdy).toBe('hello');
+  });
+
+  it('does not mark graceful when the child already exited before close', async () => {
+    const transport = await open();
+    await transport.writeLine(encodeCommandLine(1, 'exit 7'));
+    await expect(transport.exited).resolves.toEqual({ exit_code: 7, signal: null });
+
+    const facts = await transport.close();
+    expect(facts.exit_code).toBe(7);
+    expect(facts.signal).toBeNull();
+    expect(facts.graceful).toBe(false);
+    expect(facts.killed).toBe(false);
   });
 
   it('closes gracefully on Q', async () => {

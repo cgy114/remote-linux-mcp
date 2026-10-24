@@ -4,6 +4,7 @@ import { validateSessionStartInput as validateStartInput } from '../policy/sessi
 import { renderCwd, renderEnvExports } from '../policy/remote-command.js';
 import { runSshOperation } from '../pipeline/operation.js';
 import type { ResolvedTarget } from '../pipeline/target.js';
+import { buildSessionCloseAudit } from '../session/audit.js';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../session/constants.js';
 import { formatSessionStart } from '../session/format.js';
 import { createNonce, newSessionId } from '../session/frame.js';
@@ -22,6 +23,7 @@ import {
 import {
   appendSessionAudit,
   SESSION_START_ANNOTATIONS,
+  sessionErrorToToolError,
   sessionRegistry,
   sessionStartErrorToToolError,
 } from './session-common.js';
@@ -42,6 +44,7 @@ export type SessionStartInput = z.infer<typeof sessionStartInput>;
 
 interface StartPlan {
   id: string;
+  /** 握手 nonce：只给传输层使用，createSession 不再接收。 */
   nonce: string;
   cwd: string;
   envKeys: string[];
@@ -49,7 +52,9 @@ interface StartPlan {
   envLines: string[];
   idleTimeoutMs: number;
   handshakeTimeoutMs: number;
-  reservation: SessionReservation;
+  reservation?: SessionReservation;
+  /** 容量预占失败（too_many_sessions）；execute 直接返回，不 spawn。 */
+  reserveError?: ToolError;
 }
 
 type StartOutcome =
@@ -80,8 +85,7 @@ export async function sessionStart(
       const cwd = input.cwd ?? target.host.cwd;
       const cwdExpr = renderCwd(cwd);
       const envLines = renderEnvExports(input.env);
-      const reservation = registry.beginStart(target.destination);
-      return {
+      const plan: StartPlan = {
         id: newSessionId(),
         nonce: createNonce(),
         cwd,
@@ -90,10 +94,29 @@ export async function sessionStart(
         envLines,
         idleTimeoutMs: input.idle_timeout_ms ?? DEFAULT_IDLE_TIMEOUT_MS,
         handshakeTimeoutMs: target.host.timeouts.connectMs + HANDSHAKE_EXTRA_MS,
-        reservation,
       };
+      try {
+        plan.reservation = registry.beginStart(target.destination);
+      } catch (e) {
+        // 容量耗尽不是 spawn 失败：保留带会话提示/retryable 的错误，交给 execute 走
+        // 统一的 audit/format 路径（不建立任何连接）。
+        plan.reserveError = sessionErrorToToolError(e, ctx.log);
+      }
+      return plan;
     },
     execute: async ({ target, plan }): Promise<StartOutcome> => {
+      if (plan.reserveError !== undefined) return { ok: false, error: plan.reserveError };
+      if (plan.reservation === undefined) {
+        return {
+          ok: false,
+          error: {
+            kind: 'Internal',
+            code: 'session_internal_error',
+            message: 'session reservation was lost before start',
+            retryable: false,
+          },
+        };
+      }
       let transport: SessionTransport | undefined;
       try {
         transport = await openSessionTransport({
@@ -106,9 +129,9 @@ export async function sessionStart(
           handshakeTimeoutMs: plan.handshakeTimeoutMs,
           log: ctx.log,
         });
-        const session = createSession({
+        let current: Session | undefined;
+        current = createSession({
           id: plan.id,
-          nonce: plan.nonce,
           target: {
             alias: target.host.alias,
             destination: target.destination,
@@ -121,9 +144,33 @@ export async function sessionStart(
           idleTimeoutMs: plan.idleTimeoutMs,
           maxQueue: registry.maxQueue,
           log: ctx.log,
+          // 自关闭（idle/timeout/protocol/transport/shutdown）与显式关闭都经此写审计；
+          // sessionClose 工具不再重复写，保证每个会话恰好一条 close 记录。
+          onAuditClose: async (facts) => {
+            const snapshot = current?.snapshot();
+            await appendSessionAudit(
+              buildSessionCloseAudit({
+                sessionId: plan.id,
+                alias: target.host.alias,
+                destination: target.destination,
+                cwd: plan.cwd,
+                envKeys: plan.envKeys,
+                commandsRun: snapshot?.commands_run ?? 0,
+                outputBytes: snapshot?.output_bytes ?? 0,
+                truncated: snapshot?.truncated ?? false,
+                durationMs: facts.duration_ms,
+                exitCode: facts.exit_code,
+                signal: facts.signal,
+                graceful: facts.graceful,
+                killed: facts.killed,
+                reason: facts.reason,
+              }),
+              ctx,
+            );
+          },
         });
-        plan.reservation.commit(session);
-        return { ok: true, session };
+        plan.reservation.commit(current);
+        return { ok: true, session: current };
       } catch (e) {
         plan.reservation.abort();
         if (transport !== undefined) {

@@ -81,15 +81,26 @@ const frameSegment: fc.Arbitrary<Segment> = fc.oneof(
     ),
 );
 
-// 数据段不含 RS，避免随机数据与标记前缀意外重叠（那类情况有单独用例）。
-const dataSegment: fc.Arbitrary<Segment> = fc
-  .uint8Array({ maxLength: 40 })
-  .map(
-    (arr): Segment => ({
-      kind: 'data',
-      bytes: Buffer.from(Array.from(arr).filter((b) => b !== RS)),
-    }),
-  );
+// 随机数据不过滤 RS：末尾的 RS 会留在 carry，由最终 flush() 作为数据吐出。
+const rawDataSegment: fc.Arbitrary<Segment> = fc.uint8Array({ maxLength: 40 }).map(
+  (arr): Segment => ({ kind: 'data', bytes: Buffer.from(arr) }),
+);
+
+// 显式的伪前缀/内嵌分隔符。刻意只取远短于完整标记的前缀，避免随机后续字节
+// 恰好补全标记（那属于帧，不应当作数据）。
+const prefix = markerPrefix(NONCE);
+const pseudoDataSegments: Segment[] = [
+  { kind: 'data', bytes: Buffer.from([RS]) },
+  { kind: 'data', bytes: Buffer.from([RS, 0x52]) },
+  { kind: 'data', bytes: Buffer.from(prefix.subarray(0, 6)) },
+  { kind: 'data', bytes: Buffer.from(prefix.subarray(0, 12)) },
+  { kind: 'data', bytes: Buffer.from([0x61, RS, 0x62, US, 0x63]) },
+];
+
+const dataSegment: fc.Arbitrary<Segment> = fc.oneof(
+  rawDataSegment,
+  fc.constantFrom(...pseudoDataSegments),
+);
 
 const segmentArb: fc.Arbitrary<Segment> = fc.oneof(dataSegment, frameSegment);
 
@@ -264,6 +275,39 @@ describe('createFrameParser', () => {
     expect(Buffer.concat([partial, Buffer.from('X')]).equals(dataOf(second.events))).toBe(true);
   });
 
+  it('flushes a trailing RS held in carry when the stream ends', () => {
+    const parser = createFrameParser(NONCE);
+    const first = parser.push(Buffer.from('hello'));
+    expect(dataOf(first.events).toString()).toBe('hello');
+
+    const second = parser.push(Buffer.from([RS]));
+    expect(second.error).toBeUndefined();
+    expect(second.events).toEqual([]);
+
+    const flushed = parser.flush();
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0]!.type).toBe('data');
+    expect(dataOf(flushed).equals(Buffer.from([RS]))).toBe(true);
+    expect(parser.flush()).toEqual([]);
+  });
+
+  it('flushes an incomplete marker prefix as data', () => {
+    const parser = createFrameParser(NONCE);
+    const partial = markerPrefix(NONCE).subarray(0, 20);
+    expect(parser.push(partial).events).toEqual([]);
+
+    const flushed = parser.flush();
+    expect(flushed).toHaveLength(1);
+    expect(dataOf(flushed).equals(partial)).toBe(true);
+    expect(parser.flush()).toEqual([]);
+  });
+
+  it('flushes nothing after a parse error', () => {
+    const parser = createFrameParser(NONCE);
+    expect(parser.push(marker(NONCE, 'bad body')).error).toBe('bad_frame');
+    expect(parser.flush()).toEqual([]);
+  });
+
   it('keeps a partial prefix across many chunks', () => {
     const parser = createFrameParser(NONCE);
     const prefix = markerPrefix(NONCE);
@@ -377,6 +421,9 @@ describe('createFrameParser', () => {
           const parser = createFrameParser(NONCE);
           const results: FrameParseResult[] = [];
           for (const chunk of chunks) results.push(parser.push(chunk));
+          // 流结束：carry 里的不完整前缀属于数据。
+          const flushed = parser.flush();
+          if (flushed.length > 0) results.push({ events: flushed });
           const got = collect(results);
 
           expect(got.error).toBeUndefined();
