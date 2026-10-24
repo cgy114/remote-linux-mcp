@@ -351,10 +351,14 @@ async function assertToolsListed(harness: ServerHarness, id: number): Promise<vo
     'ssh_download',
     'ssh_read_file',
     'ssh_write_file',
+    'session_start',
+    'session_send',
+    'session_close',
+    'session_list',
   ]) {
     expect(names).toContain(name);
   }
-  expect(names).toHaveLength(7);
+  expect(names).toHaveLength(11);
 
   const annotationsOf = (name: string): ToolAnnotations | undefined =>
     tools.find((tool) => tool.name === name)?.annotations;
@@ -378,6 +382,26 @@ async function assertToolsListed(harness: ServerHarness, id: number): Promise<vo
     idempotentHint: true,
     openWorldHint: true,
   });
+
+  expect(annotationsOf('session_start')).toEqual({
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: true,
+  });
+  expect(annotationsOf('session_send')).toEqual({
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: true,
+  });
+  expect(annotationsOf('session_close')).toEqual({
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint: true,
+  });
+  expect(annotationsOf('session_list')).toEqual({ readOnlyHint: true });
 }
 
 /** 单次 CLI 运行（不进入 MCP 会话），用于未知命令等场景。 */

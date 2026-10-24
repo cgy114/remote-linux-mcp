@@ -6,9 +6,21 @@ import { EXIT } from './constants.js';
 import { ConfigError } from './errors/classes.js';
 import { serializeError } from './log.js';
 import { installSignalHandlers, shutdown } from './lifecycle.js';
+import { SHUTDOWN_BUDGET_MS } from './session/constants.js';
+import { getSessionRegistry } from './session/registry.js';
 import { registerTool, type ToolContext } from './tools/common.js';
 import { hostCheck, hostCheckInput } from './tools/host-check.js';
 import { hostList, hostListInput } from './tools/host-list.js';
+import { sessionClose, sessionCloseInput } from './tools/session-close.js';
+import {
+  SESSION_CLOSE_ANNOTATIONS,
+  SESSION_LIST_ANNOTATIONS,
+  SESSION_SEND_ANNOTATIONS,
+  SESSION_START_ANNOTATIONS,
+} from './tools/session-common.js';
+import { sessionList, sessionListInput } from './tools/session-list.js';
+import { sessionSend, sessionSendInput } from './tools/session-send.js';
+import { sessionStart, sessionStartInput } from './tools/session-start.js';
 import { sshDownload, sshDownloadInput } from './tools/ssh-download.js';
 import { sshExec, sshExecInput } from './tools/ssh-exec.js';
 import { sshReadFile, sshReadFileInput } from './tools/ssh-read-file.js';
@@ -25,7 +37,10 @@ const INSTRUCTIONS =
   'ssh_exec 仅对已信任的主机执行命令，调用前确认命令的影响面（会修改远端状态、不可幂等）。' +
   '文件传输工具：ssh_upload / ssh_download（recursive=true 走目录 tar + manifest 校验）、' +
   'ssh_read_file（只读，返回 UTF-8 或 base64 内容）、ssh_write_file（原子写入）。' +
-  '本地路径受 files.local_roots 限制，远端路径受读/写 deny 限制；覆盖默认关闭，需要时显式传 overwrite=true。';
+  '本地路径受 files.local_roots 限制，远端路径受读/写 deny 限制；覆盖默认关闭，需要时显式传 overwrite=true。' +
+  '持久会话工具：session_start 建立常驻 shell（仍需信任主机），session_send 在该 shell 中依次执行命令，' +
+  'session_close 优雅关闭，session_list 查看当前会话。会话按 FIFO 串行执行，空闲超时后自动关闭；' +
+  '会话内环境变量与 cwd 只属于该 shell，不会影响其他工具调用。';
 
 /** 创建一个未注册工具的 McpServer 实例。 */
 export function createMcpServer(_ctx: ToolContext): McpServer {
@@ -138,6 +153,79 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
     ctx,
   );
+
+  registerSessionTools(server, ctx);
+}
+
+/** 注册 P4 持久会话工具（start/send/close/list）。 */
+export function registerSessionTools(server: McpServer, ctx: ToolContext): void {
+  registerTool(
+    server,
+    {
+      name: 'session_start',
+      title: '启动持久会话',
+      description:
+        '在已信任的远程主机上建立常驻 bash 会话（不分配 TTY），返回 session_id。' +
+        '指令、环境变量（env）与 cwd 只作用于该会话；空闲超过 idle_timeout_ms（默认 15 分钟）会自动关闭。' +
+        '会话数量受全局/单目标上限约束，超过时返回 too_many_sessions。',
+      inputSchema: sessionStartInput,
+      annotations: SESSION_START_ANNOTATIONS,
+      handler: (input, c) => sessionStart(input, c),
+    },
+    ctx,
+  );
+  registerTool(
+    server,
+    {
+      name: 'session_send',
+      title: '在会话中执行命令',
+      description:
+        '在指定持久会话中执行一条命令，返回远端退出码与输出。同一会话内的命令按 FIFO 串行执行，' +
+        '执行期间占用主机并发许可；超出会话队列上限时返回 session_busy。' +
+        '命令超时（timeout_ms）会关闭该会话并返回 session_timeout。',
+      inputSchema: sessionSendInput,
+      annotations: SESSION_SEND_ANNOTATIONS,
+      handler: (input, c) => sessionSend(input, c),
+    },
+    ctx,
+  );
+  registerTool(
+    server,
+    {
+      name: 'session_close',
+      title: '关闭会话',
+      description:
+        '优雅关闭持久会话（发送 Q 并关闭 stdin，宽限期后强杀进程树），返回退出码/信号等事实。' +
+        '关闭是幂等的；未知或已移除的会话返回 unknown_session。',
+      inputSchema: sessionCloseInput,
+      annotations: SESSION_CLOSE_ANNOTATIONS,
+      handler: (input, c) => sessionClose(input, c),
+    },
+    ctx,
+  );
+  registerTool(
+    server,
+    {
+      name: 'session_list',
+      title: '列出持久会话',
+      description:
+        '列出本进程内的会话状态快照（状态、队列深度、已执行命令数、累计输出字节等）。' +
+        '不建立连接、不占用并发许可，也不返回命令或输出内容。',
+      inputSchema: sessionListInput,
+      annotations: SESSION_LIST_ANNOTATIONS,
+      handler: (input, c) => sessionList(input, c),
+    },
+    ctx,
+  );
+}
+
+/** 关闭所有持久会话（最多 SHUTDOWN_BUDGET_MS）；closeAll 永不 reject。 */
+async function closeAllSessions(reason: string): Promise<void> {
+  try {
+    await getSessionRegistry().closeAll(reason, SHUTDOWN_BUDGET_MS);
+  } catch {
+    // closeAll 约定永不 reject；这里再兜底一次。
+  }
 }
 
 export interface ServeOptions {
@@ -206,6 +294,7 @@ export async function serve(opts: ServeOptions): Promise<number> {
       stdin: process.stdin,
       onShutdown: (reason) => {
         void (async () => {
+          await closeAllSessions(reason);
           await shutdown({ reason, log });
           await handle?.close().catch(() => undefined);
           finish();
@@ -228,6 +317,7 @@ export async function serve(opts: ServeOptions): Promise<number> {
     await Promise.race([wireClosed, finished]);
     uninstall();
     uninstall = undefined;
+    await closeAllSessions('transport_closed');
     await shutdown({ reason: 'transport_closed', log });
     return EXIT.ok;
   } catch (err) {
