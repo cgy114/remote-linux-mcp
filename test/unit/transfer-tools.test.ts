@@ -459,7 +459,7 @@ describe('tool wiring: audit and formatting', () => {
     expect(structured['truncated']).toBe(false);
   });
 
-  it('formats failures with isError and an error object', () => {
+  it('formats failures with isError and an error object including retryable', () => {
     const failure: ToolError = {
       kind: 'Policy',
       code: 'target_exists',
@@ -474,8 +474,56 @@ describe('tool wiring: audit and formatting', () => {
     });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toMatchObject({
-      error: { kind: 'Policy', code: 'target_exists', message: 'already exists', hint: 'pass overwrite=true' },
+      error: {
+        kind: 'Policy',
+        code: 'target_exists',
+        message: 'already exists',
+        hint: 'pass overwrite=true',
+        retryable: false,
+      },
     });
+  });
+
+  it('keeps the structured key set identical across denial and execution failure', async () => {
+    const input = {
+      host: 'web1',
+      local_path: path.join(root, 'a.txt'),
+      remote_path: '~/a.txt',
+    };
+
+    // 执行失败（runSshOperation 已通过信任/准备，format 阶段返回 facts.failure）。
+    state.uploadFacts = () =>
+      state.mkTransfer({
+        ok: false,
+        failure: {
+          kind: 'Policy',
+          code: 'target_exists',
+          message: 'exists',
+          retryable: false,
+        },
+      });
+    const executed = await sshUpload(input, ctx);
+
+    // trust 拒绝（租约前）。
+    state.uploadFacts = () => state.mkTransfer();
+    state.trust = { ok: false, fact: { reason: 'not_registered' } };
+    const denied = await sshUpload(input, ctx);
+
+    // prepare 拒绝（租约前）。
+    state.trust = { ok: true };
+    const prepared = await sshUpload(
+      { host: 'web1', local_path: path.join(root, 'a.txt'), remote_path: '/etc/passwd' },
+      ctx,
+    );
+
+    for (const result of [denied, prepared, executed]) {
+      expect(result.isError).toBe(true);
+      const structured = result.structuredContent as Record<string, unknown>;
+      expect(Object.keys(structured).sort()).toEqual(['error', 'host', 'tool']);
+      expect(structured['tool']).toBe('ssh_upload');
+      expect(structured['host']).toBe('web1');
+      expect((structured['error'] as Record<string, unknown>)['retryable']).toBeTypeOf('boolean');
+    }
   });
 
   it('formats read/write/transfer success payloads', () => {

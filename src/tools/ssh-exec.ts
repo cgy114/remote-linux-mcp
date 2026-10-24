@@ -15,7 +15,13 @@ import {
   type ExecSizeLimits,
 } from '../policy/remote-command.js';
 import type { EffectiveHost, Logger, RunResult, ToolError } from '../types.js';
-import { errorToToolError, textResult, toolErrorResult, type ToolContext } from './common.js';
+import {
+  aliasOf,
+  errorToToolError,
+  textResult,
+  toolErrorResult,
+  type ToolContext,
+} from './common.js';
 
 /** ssh_exec 的输入边界；所有字段在 MCP 层先由 zod 校验。 */
 export const sshExecInput = z
@@ -77,12 +83,13 @@ export async function sshExec(input: SshExecInput, ctx: ToolContext): Promise<Ca
   try {
     validateExecInput(input);
   } catch (e) {
-    return toolErrorResult(errorToToolError(e, ctx.log));
+    return toolErrorResult(errorToToolError(e, ctx.log), aliasOf(input), 'ssh_exec');
   }
 
   return runSshOperation<ExecPlan, RunResult>({
     input,
     ctx,
+    toolName: 'ssh_exec',
     prepare: (target) => {
       const plan = buildExecCommand({
         command: input.command,
@@ -216,6 +223,7 @@ export function formatExecResult(input: FormatExecResultInput): CallToolResult {
   }
 
   const structured: Record<string, unknown> = {
+    tool: 'ssh_exec',
     host: input.alias,
     destination: input.destination,
     exit_code: run.exitCode,
@@ -237,6 +245,7 @@ export function formatExecResult(input: FormatExecResultInput): CallToolResult {
       code: failure.code,
       message: failure.message,
       hint: failure.hint,
+      retryable: failure.retryable,
     };
     return {
       content: [{ type: 'text', text: lines.join('\n') }],

@@ -77,12 +77,18 @@ export interface SwapRemoteResult {
   backup: string;
   run: RunResult;
   error?: ToolError;
+  /** 原 target 内容仍在 target，或提交失败后已回滚到 target。 */
   rolledBack: boolean;
+  /** 与 rolledBack 同义：原内容是否仍然/重新位于 target。 */
+  restored: boolean;
 }
 
 /**
- * 原子替换：target -> backup，staged -> target；第二步失败时把 backup 移回。
- * 返回备份路径（不存在的目标不会产生备份，但路径仍返回，供 cleanup 幂等处理）。
+ * 原子替换：target -> backup，staged -> target；提交失败时回滚。
+ * 全部步骤在**一次**远端命令中完成，退出码语义：
+ *   0 成功；1 备份阶段失败（target 未被移动）；2 提交失败但已回滚（或无需回滚）；
+ *   3 提交失败且回滚失败（原内容留在 backup）。
+ * 路径全部经 renderRemoteShellPath（单引号引用），不做裸拼接。
  */
 export async function swapRemoteIntoPlace(
   deps: TransferDeps,
@@ -106,40 +112,37 @@ export async function swapRemoteIntoPlace(
   const s = renderRemoteShellPath(staged);
   const b = renderRemoteShellPath(backup);
 
-  const backedUp = await runRemoteCommand(
-    deps,
-    `if test -e ${t} || test -L ${t}; then mv -f -- ${t} ${b} || exit 1; fi`,
-    { label: `swap-backup:${deps.target.host.alias}` },
-  );
-  const backupOutcome = outcome(backedUp, 'swap backup');
-  if (!backupOutcome.ok) {
-    return {
-      ok: false,
-      backup,
-      run: backedUp,
-      ...(backupOutcome.error !== undefined ? { error: backupOutcome.error } : {}),
-      rolledBack: false,
-    };
-  }
+  // 单次往返：备份 -> 提交 -> 成功清理备份 / 失败回滚。
+  const script = [
+    `if [ -e ${t} ] || [ -L ${t} ]; then`,
+    `  mv -f -- ${t} ${b} || exit 1`,
+    'fi',
+    `if mv -f -- ${s} ${t}; then`,
+    `  if [ -e ${b} ] || [ -L ${b} ]; then rm -rf -- ${b} || :; fi`,
+    '  exit 0',
+    'fi',
+    `if [ -e ${b} ] || [ -L ${b} ]; then`,
+    `  mv -f -- ${b} ${t} 2>/dev/null && exit 2`,
+    '  exit 3',
+    'fi',
+    'exit 2',
+  ].join('\n');
 
-  const moved = await runRemoteCommand(deps, `mv -f -- ${s} ${t}`, {
-    label: `swap-commit:${deps.target.host.alias}`,
+  const run = await runRemoteCommand(deps, script, {
+    label: `swap:${deps.target.host.alias}`,
   });
-  const moveOutcome = outcome(moved, 'swap commit');
-  if (moveOutcome.ok) {
-    return { ok: true, backup, run: moved, rolledBack: false };
+  const failure = classifyTransportRun(run, { label: 'swap' });
+  if (failure === undefined) {
+    return { ok: true, backup, run, rolledBack: false, restored: true };
   }
 
-  const rollback = await runRemoteCommand(
-    deps,
-    `if test -e ${b} || test -L ${b}; then mv -f -- ${b} ${t} || exit 1; fi`,
-    { label: `swap-rollback:${deps.target.host.alias}` },
-  );
-  return {
-    ok: false,
-    backup,
-    run: moved,
-    ...(moveOutcome.error !== undefined ? { error: moveOutcome.error } : {}),
-    rolledBack: rollback.exitCode === 0,
-  };
+  const exitCode = run.exitCode;
+  const restored = exitCode === 1 || exitCode === 2;
+  const stage =
+    exitCode === 1 ? 'backup' : exitCode === 2 ? 'commit' : exitCode === 3 ? 'rollback' : undefined;
+  const error =
+    stage === undefined
+      ? failure
+      : { ...failure, details: { ...(failure.details ?? {}), stage } };
+  return { ok: false, backup, run, error, rolledBack: restored, restored };
 }

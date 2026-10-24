@@ -35,6 +35,8 @@ export interface OperationArgs<Plan, Produced> {
 export interface SshOperationHooks<Plan, Produced> {
   input: { host?: string };
   ctx: ToolContext;
+  /** 工具名；用于 pre-lease 拒绝时 structuredContent 的 `tool` 字段。 */
+  toolName?: string;
   /** 测试可注入；默认进程单例。 */
   limiter?: HostLimiter;
   /** 租约外准备（构建命令计划、解析超时等）；抛错即 Policy/Internal 结果。 */
@@ -102,7 +104,7 @@ export async function runSshOperation<Plan, Produced>(
     if (!trust.ok) {
       const error = trustFactToToolError(trust.fact, hooks.ctx.log);
       await notifyDenied(hooks, 'trust', error, resolved);
-      return toolErrorResult(error, alias);
+      return toolErrorResult(error, alias, hooks.toolName);
     }
 
     // 准备阶段在租约外：慢速校验不应占住主机并发槽位。
@@ -130,6 +132,6 @@ export async function runSshOperation<Plan, Produced>(
   } catch (e) {
     const error = errorToToolError(e, hooks.ctx.log);
     if (phase !== 'execute') await notifyDenied(hooks, phase, error, target);
-    return toolErrorResult(error, alias);
+    return toolErrorResult(error, alias, hooks.toolName);
   }
 }

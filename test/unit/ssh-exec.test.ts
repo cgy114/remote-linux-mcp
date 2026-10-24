@@ -273,8 +273,15 @@ describe('ssh_exec unit', () => {
       );
       const result = formatExecResult({ ...input, run: makeRun({ exitCode: 255 }), failure });
       expect(result.isError).toBe(true);
-      const structured = result.structuredContent as { error?: { kind?: string; code?: string } };
+      const structured = result.structuredContent as {
+        tool?: string;
+        host?: string;
+        error?: { kind?: string; code?: string; retryable?: boolean };
+      };
       expect(structured.error?.kind).toBe('Auth');
+      expect(structured.error?.retryable).toBeTypeOf('boolean');
+      expect(structured.tool).toBe('ssh_exec');
+      expect(structured.host).toBe('web1');
       expect(textOf(result)).toContain('error: [Auth]');
     });
   });
@@ -285,6 +292,12 @@ describe('ssh_exec unit', () => {
       expect(result.isError).toBe(true);
       expect(textOf(result)).toMatch(/HostKey|trust/i);
       expect(runSshMock).not.toHaveBeenCalled();
+      // pre-lease 拒绝与执行失败使用同一套 structuredContent 标识。
+      expect(result.structuredContent).toMatchObject({
+        tool: 'ssh_exec',
+        host: 'web1',
+        error: { retryable: expect.any(Boolean) },
+      });
     });
 
     it('runs the command, forwards stdin, uses host defaults and writes an audit record', async () => {

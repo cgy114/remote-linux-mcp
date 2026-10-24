@@ -26,7 +26,7 @@ const state = vi.hoisted(() => {
   return {
     events: [] as string[],
     mkRun,
-    probePath: (() => ({ ok: true, facts: {} })) as () => unknown,
+    probePath: ((_target: string) => ({ ok: true, facts: {} })) as (target: string) => unknown,
     probeManifest: (() => ({ ok: true, entries: [] })) as () => unknown,
     swap: (() => ({ ok: true, backup: '/tmp/.backup', run: mkRun(0), rolledBack: false })) as () => unknown,
     remoteRun: (() => mkRun(0)) as () => unknown,
@@ -36,9 +36,9 @@ const state = vi.hoisted(() => {
 });
 
 vi.mock('../../../src/transfer/probe.js', () => ({
-  probeRemotePath: async () => {
-    state.events.push('probe');
-    return state.probePath();
+  probeRemotePath: async (_deps: unknown, target: string) => {
+    state.events.push(target === '/home/u' ? 'probe-parent' : 'probe');
+    return state.probePath(target);
   },
   probeRemoteManifest: async () => {
     state.events.push('manifest');
@@ -140,12 +140,27 @@ const HELLO_ENTRY: ManifestEntry = {
   sha256: SHA_HELLO,
 };
 
+function parentDirFacts(overrides: Record<string, unknown> = {}) {
+  return {
+    ok: true,
+    facts: {
+      path: '/home/u',
+      exists: true,
+      type: 'dir',
+      size: 0,
+      mode: 0o755,
+      realpath: '/home/u',
+      ...overrides,
+    },
+  };
+}
+
 function reset(): void {
   state.events.length = 0;
-  state.probePath = () => ({
-    ok: true,
-    facts: { path: '/home/u/tree', exists: false },
-  });
+  state.probePath = (target: string) =>
+    target === '/home/u'
+      ? parentDirFacts()
+      : { ok: true, facts: { path: target, exists: false } };
   state.probeManifest = () => ({ ok: true, entries: [] });
   state.swap = () => ({
     ok: true,
@@ -198,8 +213,9 @@ describe('directory transfer state machines', () => {
       expect(facts.bytes).toBe(5);
       expect(facts.verified).toBe(true);
       expect(facts.manifestDigest).toMatch(/^[0-9a-f]{64}$/);
-      expect(state.events.slice(0, 6)).toEqual([
+      expect(state.events.slice(0, 7)).toEqual([
         'probe',
+        'probe-parent',
         'mkdir',
         'archive',
         'extract',
@@ -287,6 +303,53 @@ describe('directory transfer state machines', () => {
       expect(facts.failure?.code).toBe('remote_exit');
       expect(state.events).not.toContain('archive');
     });
+
+    it('rejects a parent realpath denied for writes', async () => {
+      state.probePath = (target: string) =>
+        target === '/home/u'
+          ? parentDirFacts({ realpath: '/etc' })
+          : { ok: true, facts: { path: target, exists: false } };
+      const facts = await uploadTree({
+        deps: makeDeps(),
+        local: source(),
+        manifest: [HELLO_ENTRY],
+        remote: '~/new-tree',
+        overwrite: false,
+      });
+      expect(facts.failure).toMatchObject({ kind: 'Policy', code: 'remote_denied_write' });
+      expect(state.events).toEqual(['probe', 'probe-parent']);
+      expect(state.events).not.toContain('mkdir');
+    });
+
+    it('rejects a missing or non-directory parent', async () => {
+      state.probePath = (target: string) =>
+        target === '/home/u'
+          ? { ok: true, facts: { path: target, exists: false } }
+          : { ok: true, facts: { path: target, exists: false } };
+      const missing = await uploadTree({
+        deps: makeDeps(),
+        local: source(),
+        manifest: [HELLO_ENTRY],
+        remote: '~/new-tree',
+        overwrite: false,
+      });
+      expect(missing.failure?.code).toBe('target_parent_missing');
+
+      state.events.length = 0;
+      state.probePath = (target: string) =>
+        target === '/home/u'
+          ? parentDirFacts({ type: 'file' })
+          : { ok: true, facts: { path: target, exists: false } };
+      const notDir = await uploadTree({
+        deps: makeDeps(),
+        local: source(),
+        manifest: [HELLO_ENTRY],
+        remote: '~/new-tree',
+        overwrite: false,
+      });
+      expect(notDir.failure?.code).toBe('target_parent_not_directory');
+      expect(state.events).toEqual(['probe', 'probe-parent']);
+    });
   });
 
   describe('downloadTree', () => {
@@ -368,6 +431,60 @@ describe('directory transfer state machines', () => {
       expect(facts.failure?.code).toBe('target_exists');
       expect(await fs.readFile(path.join(out, 'old.txt'), 'utf8')).toBe('old');
     });
+
+    it('refuses to replace a regular file with a directory when overwrite is true', async () => {
+      remoteDir();
+      state.probeManifest = () => ({ ok: true, entries: [HELLO_ENTRY] });
+      const out = path.join(dir, 'out');
+      await fs.writeFile(out, 'file-content');
+
+      const facts = await downloadTree({
+        deps: makeDeps(),
+        remote: '~/tree',
+        localTarget: { path: out, exists: true },
+        overwrite: true,
+      });
+      expect(facts.failure).toMatchObject({ kind: 'Policy', code: 'target_type_mismatch' });
+      expect(await fs.readFile(out, 'utf8')).toBe('file-content');
+      expect(state.events).toEqual(['probe', 'manifest']);
+    });
+
+    it('reports target_exists for a file target when overwrite is false', async () => {
+      remoteDir();
+      state.probeManifest = () => ({ ok: true, entries: [HELLO_ENTRY] });
+      const out = path.join(dir, 'out');
+      await fs.writeFile(out, 'file-content');
+
+      const facts = await downloadTree({
+        deps: makeDeps(),
+        remote: '~/tree',
+        localTarget: { path: out, exists: true },
+        overwrite: false,
+      });
+      expect(facts.failure).toMatchObject({ kind: 'Policy', code: 'target_exists' });
+      expect(await fs.readFile(out, 'utf8')).toBe('file-content');
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'refuses to replace a symlink target when overwrite is true',
+      async () => {
+        remoteDir();
+        state.probeManifest = () => ({ ok: true, entries: [HELLO_ENTRY] });
+        const out = path.join(dir, 'out');
+        const real = path.join(dir, 'real-dir');
+        await fs.mkdir(real);
+        await fs.symlink(real, out, 'dir');
+
+        const facts = await downloadTree({
+          deps: makeDeps(),
+          remote: '~/tree',
+          localTarget: { path: out, exists: true },
+          overwrite: true,
+        });
+        expect(facts.failure).toMatchObject({ kind: 'Policy', code: 'target_type_mismatch' });
+        expect((await fs.lstat(out)).isSymbolicLink()).toBe(true);
+      },
+    );
 
     it('replaces an existing target when overwrite is true and fails on manifest mismatch', async () => {
       remoteDir();

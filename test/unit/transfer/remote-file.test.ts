@@ -23,7 +23,8 @@ const state = vi.hoisted(() => {
     events: [] as string[],
     steps: [] as string[][],
     mkRun,
-    probe: (() => ({ ok: true, facts: {} })) as () => unknown,
+    probe: ((_target: string) => ({ ok: true, facts: {} })) as (target: string) => unknown,
+    verifyInput: undefined as Record<string, unknown> | undefined,
     readRun: (() => mkRun(0)) as () => unknown,
     readCommand: '',
     readMaxOutputBytes: 0,
@@ -35,9 +36,9 @@ const state = vi.hoisted(() => {
 });
 
 vi.mock('../../../src/transfer/probe.js', () => ({
-  probeRemotePath: async () => {
-    state.events.push('probe');
-    return state.probe();
+  probeRemotePath: async (_deps: unknown, target: string) => {
+    state.events.push(target === '/home/u' ? 'probe-parent' : 'probe');
+    return state.probe(target);
   },
   resolveRemoteHome: async () => '/home/u',
 }));
@@ -86,8 +87,9 @@ vi.mock('../../../src/transfer/sftp.js', async (importOriginal) => {
 });
 
 vi.mock('../../../src/transfer/verify.js', () => ({
-  verifyRemoteFile: async () => {
+  verifyRemoteFile: async (_deps: unknown, input: Record<string, unknown>) => {
     state.events.push('verify');
+    state.verifyInput = input;
     return state.verifyRemote();
   },
 }));
@@ -150,12 +152,33 @@ function fileFacts(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function parentDirFacts(overrides: Record<string, unknown> = {}) {
+  return {
+    ok: true,
+    facts: {
+      path: '/home/u',
+      exists: true,
+      type: 'dir',
+      size: 0,
+      mode: 0o755,
+      realpath: '/home/u',
+      ...overrides,
+    },
+  };
+}
+
+function missingTarget(path = '/home/u/a.txt') {
+  return { ok: true, facts: { path, exists: false } };
+}
+
 function reset(): void {
   state.events.length = 0;
   state.steps.length = 0;
   state.readCommand = '';
   state.readMaxOutputBytes = 0;
-  state.probe = () => fileFacts();
+  state.verifyInput = undefined;
+  state.probe = (target: string) =>
+    target === '/home/u' ? parentDirFacts() : fileFacts();
   state.readRun = () => state.mkRun(0, Buffer.from('hello').toString('base64'));
   state.sftpRun = () => state.mkRun(0);
   state.verifyRemote = () => undefined;
@@ -277,8 +300,9 @@ describe('remote-file state machines', () => {
   });
 
   describe('writeRemoteFile', () => {
-    it('puts, verifies, chmods and swaps in order', async () => {
-      state.probe = () => ({ ok: true, facts: { path: '/home/u/a.txt', exists: false } });
+    it('puts and chmods in one batch, then verifies and swaps', async () => {
+      state.probe = (target: string) =>
+        target === '/home/u' ? parentDirFacts() : missingTarget();
       const facts = await writeRemoteFile({
         deps: makeDeps(),
         remote: '~/a.txt',
@@ -292,8 +316,14 @@ describe('remote-file state machines', () => {
       expect(facts.sha256).toBe(SHA_HELLO);
       expect(facts.mode).toBe(0o640);
       expect(facts.verified).toBe(true);
-      expect(state.events.slice(0, 5)).toEqual(['probe', 'put', 'verify', 'chmod', 'swap']);
-      expect(state.steps[1]![0]).toContain('chmod 640');
+      expect(state.events.slice(0, 5)).toEqual(['probe', 'probe-parent', 'put', 'verify', 'swap']);
+      // 只跑一次 sftp batch：先 put，再对 staging chmod。
+      expect(state.steps).toHaveLength(1);
+      expect(state.steps[0]).toHaveLength(2);
+      expect(state.steps[0]![0]).toContain('put ');
+      expect(state.steps[0]![1]).toContain('chmod 640');
+      // mode 在 verify 之前已应用，并随校验一起复核。
+      expect(state.verifyInput).toMatchObject({ sha256: SHA_HELLO, bytes: 5, mode: 0o640 });
       if (process.platform !== 'win32') {
         expect(state.putLocalMode).toBe(0o600);
       }
@@ -310,7 +340,39 @@ describe('remote-file state machines', () => {
       });
       expect(facts.ok).toBe(true);
       expect(facts.mode).toBe(0o600);
-      expect(state.steps[1]![0]).toContain('chmod 600');
+      expect(state.steps).toHaveLength(1);
+      expect(state.steps[0]![1]).toContain('chmod 600');
+    });
+
+    it('rejects a parent realpath denied for writes', async () => {
+      state.probe = (target: string) =>
+        target === '/home/u' ? parentDirFacts({ realpath: '/etc' }) : missingTarget();
+      const facts = await writeRemoteFile({
+        deps: makeDeps(),
+        remote: '~/new.txt',
+        content: Buffer.from('hello'),
+        encoding: 'utf8',
+        overwrite: false,
+      });
+      expect(facts.failure).toMatchObject({ kind: 'Policy', code: 'remote_denied_write' });
+      expect(state.steps).toHaveLength(0);
+      expect(state.events).toEqual(['probe', 'probe-parent']);
+    });
+
+    it('rejects a missing parent directory', async () => {
+      state.probe = (target: string) =>
+        target === '/home/u'
+          ? { ok: true, facts: { path: target, exists: false } }
+          : missingTarget();
+      const facts = await writeRemoteFile({
+        deps: makeDeps(),
+        remote: '~/new.txt',
+        content: Buffer.from('hello'),
+        encoding: 'utf8',
+        overwrite: false,
+      });
+      expect(facts.failure).toMatchObject({ kind: 'Policy', code: 'target_parent_missing' });
+      expect(state.steps).toHaveLength(0);
     });
 
     it('refuses an existing target when overwrite is false', async () => {
@@ -346,8 +408,9 @@ describe('remote-file state machines', () => {
       expect(link.failure?.code).toBe('remote_symlink');
     });
 
-    it('does not chmod or swap when verification fails', async () => {
-      state.probe = () => ({ ok: true, facts: { path: '/home/u/a.txt', exists: false } });
+    it('does not swap when verification fails', async () => {
+      state.probe = (target: string) =>
+        target === '/home/u' ? parentDirFacts() : missingTarget();
       state.verifyRemote = () => ({
         kind: 'RemoteExit',
         code: 'verify_sha256_mismatch',
@@ -363,7 +426,7 @@ describe('remote-file state machines', () => {
       });
       expect(facts.ok).toBe(false);
       expect(facts.failure?.code).toBe('verify_sha256_mismatch');
-      expect(state.events).not.toContain('chmod');
+      expect(state.events).toEqual(['probe', 'probe-parent', 'put', 'verify']);
       expect(state.events).not.toContain('swap');
     });
   });

@@ -6,6 +6,7 @@ import {
   aliasOf,
   policyError,
   registerTool,
+  toolErrorResult,
   type ToolContext,
 } from '../../src/tools/common.js';
 import type { Logger, MCPPaths } from '../../src/types.js';
@@ -26,6 +27,39 @@ describe('policyError', () => {
   it('maps ConfigError codes to config_<code>', () => {
     expect(policyError(new ConfigError('schema', 'bad')).code).toBe('config_schema');
     expect(policyError(new ConfigError('io', 'bad')).code).toBe('config_io');
+  });
+});
+
+describe('toolErrorResult', () => {
+  const error = {
+    kind: 'Policy' as const,
+    code: 'target_exists',
+    message: 'already exists',
+    hint: 'pass overwrite=true',
+    retryable: false,
+  };
+
+  it('includes tool and host when provided', () => {
+    const result = toolErrorResult(error, 'web1', 'ssh_upload');
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      tool: 'ssh_upload',
+      host: 'web1',
+      error: {
+        kind: 'Policy',
+        code: 'target_exists',
+        message: 'already exists',
+        hint: 'pass overwrite=true',
+        retryable: false,
+        details: undefined,
+      },
+    });
+  });
+
+  it('omits tool/host when not provided', () => {
+    const structured = toolErrorResult(error).structuredContent as Record<string, unknown>;
+    expect(Object.keys(structured)).toEqual(['error']);
+    expect((structured['error'] as Record<string, unknown>)['retryable']).toBe(false);
   });
 });
 

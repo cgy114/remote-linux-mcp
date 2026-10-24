@@ -66,6 +66,7 @@ export async function sshReadFile(
   return runSshOperation<ReadPlan, ReadFacts>({
     input,
     ctx,
+    toolName: 'ssh_read_file',
     prepare: (target) => buildReadPlan(input, target),
     execute: ({ target, plan }) =>
       readRemoteFile({

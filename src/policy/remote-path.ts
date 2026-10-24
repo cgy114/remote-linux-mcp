@@ -188,6 +188,8 @@ function expandEntry(entry: string, home: string | undefined): string | undefine
   if (!entry.startsWith('~')) return entry;
   const normalizedHome = stripTrailingSlash(home);
   if (entry === '~') return normalizedHome;
+  // home 为根时不能再拼分隔符，否则 "~/.ssh" 会变成 "//.ssh" 而无法按段匹配。
+  if (normalizedHome === '/') return entry.slice(1);
   return `${normalizedHome}${entry.slice(1)}`;
 }
 

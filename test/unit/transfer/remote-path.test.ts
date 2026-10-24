@@ -161,6 +161,35 @@ describe('remote-path', () => {
       expect(() => assertRemotePathAllowed('/srv/private/../public', 'read', lists.read)).not.toThrow();
     });
 
+    it('expands home deny entries as "/.ssh" (not "//.ssh") when home is the root', () => {
+      expect(() =>
+        assertRemoteRealpath('/.ssh/id_rsa', '~/x', 'read', lists.read, '/'),
+      ).toThrow(expect.objectContaining({ code: 'remote_denied_read' }));
+      expect(() =>
+        assertRemoteRealpath('/.gnupg/key', '~/x', 'read', lists.read, '/'),
+      ).toThrow(expect.objectContaining({ code: 'remote_denied_read' }));
+      expect(() =>
+        assertRemoteRealpath('/srv/ok/file', '~/x', 'read', lists.read, '/'),
+      ).not.toThrow();
+    });
+
+    it('expands home deny entries for root and trailing-slash homes', () => {
+      fc.assert(
+        fc.property(
+          fc.constantFrom('/', '//', '/root', '/root/', '/home/u', '/home/u/', '/home/u//'),
+          (home) => {
+            const base = home.replace(/\/+$/, '');
+            const real = `${base}/.ssh/id_rsa`;
+            expect(() =>
+              assertRemoteRealpath(real, '~/x', 'read', lists.read, home),
+            ).toThrow(expect.objectContaining({ code: 'remote_denied_read' }));
+            return true;
+          },
+        ),
+        { numRuns: 30 },
+      );
+    });
+
     it('checks realpath against home-expanded deny entries', () => {
       const home = '/home/u';
       expect(() =>

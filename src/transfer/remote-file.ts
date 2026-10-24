@@ -21,7 +21,12 @@ import { probeRemotePath, resolveRemoteHome } from './probe.js';
 import { chmodStep, putStep, runSftpBatch } from './sftp.js';
 import { newRemoteTempPath, swapRemoteIntoPlace } from './stage.js';
 import { verifyRemoteFile } from './verify.js';
-import { runFacts, sftpFailure, transferErrorToToolError } from './single-file.js';
+import {
+  assertWritableParent,
+  runFacts,
+  sftpFailure,
+  transferErrorToToolError,
+} from './single-file.js';
 
 export interface ReadFacts {
   ok: boolean;
@@ -276,8 +281,9 @@ function normalizeMode(mode: number): number {
 }
 
 /**
- * 写入远端文件：解码/限额 -> probe 门禁 -> 本地 0600 临时 -> sftp put 到远端临时 ->
- * verify(sha256+size) -> chmod(mode ?? 旧 mode ?? 0644) -> 原子换入 -> 清理两端临时。
+ * 写入远端文件：解码/限额 -> probe 门禁 -> 本地 0600 临时 ->
+ * sftp 单批 put+chmod 到远端临时 -> verify(sha256+size+mode) -> 原子换入 ->
+ * 清理两端临时。
  */
 export async function writeRemoteFile(input: WriteRemoteFileInput): Promise<WriteFacts> {
   const { deps, overwrite } = input;
@@ -324,6 +330,10 @@ export async function writeRemoteFile(input: WriteRemoteFileInput): Promise<Writ
       }
     }
     assertRemoteRealpath(facts.realpath ?? absolute, normalized.absolute, 'write', denyWrite, home);
+    if (!facts.exists) {
+      const parentError = await assertWritableParent(deps, absolute, denyWrite, home);
+      if (parentError !== undefined) return writeFailure(base, parentError);
+    }
 
     const mode = normalizeMode(input.mode ?? facts.mode ?? 0o644);
 
@@ -334,10 +344,15 @@ export async function writeRemoteFile(input: WriteRemoteFileInput): Promise<Writ
     const remoteTemp = newRemoteTempPath(absolute);
     const tempHandle = cleanup.addRemote(remoteTemp);
 
-    const putRun = await runSftpBatch(deps, [putStep(localTemp, remoteTemp)], {
-      ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
-      label: `write:${deps.target.host.alias}`,
-    });
+    // put 与 chmod 合并为一次 sftp batch：mode 在 verify 之前已应用。
+    const putRun = await runSftpBatch(
+      deps,
+      [putStep(localTemp, remoteTemp), chmodStep(mode, remoteTemp)],
+      {
+        ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+        label: `write:${deps.target.host.alias}`,
+      },
+    );
     lastRun = putRun;
     const putFailure = sftpFailure(putRun, 'sftp write');
     if (putFailure !== undefined) return writeFailure(base, putFailure, putRun);
@@ -346,16 +361,9 @@ export async function writeRemoteFile(input: WriteRemoteFileInput): Promise<Writ
       path: remoteTemp,
       sha256,
       bytes: input.content.length,
+      mode,
     });
     if (verify !== undefined) return writeFailure(base, verify, putRun);
-
-    const chmodRun = await runSftpBatch(deps, [chmodStep(mode, remoteTemp)], {
-      ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
-      label: `write-chmod:${deps.target.host.alias}`,
-    });
-    lastRun = chmodRun;
-    const chmodFailure = sftpFailure(chmodRun, 'sftp chmod');
-    if (chmodFailure !== undefined) return writeFailure(base, chmodFailure, chmodRun);
 
     const swap = await swapRemoteIntoPlace(deps, { staged: remoteTemp, target: absolute });
     if (!swap.ok) {

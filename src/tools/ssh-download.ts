@@ -109,6 +109,7 @@ export async function sshDownload(
   return runSshOperation<DownloadPlan, Awaited<ReturnType<typeof executeDownload>>>({
     input,
     ctx,
+    toolName: 'ssh_download',
     prepare: (target) => buildDownloadPlan(input, target),
     execute: ({ target, plan }) => executeDownload(makeTransferDeps(target, ctx), plan),
     classifyFailure: (facts) => classifyTransferFacts(facts),

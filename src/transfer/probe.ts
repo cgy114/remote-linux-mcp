@@ -3,7 +3,7 @@ import { normalizeRemotePath, renderRemoteShellPath } from '../policy/remote-pat
 import type { ToolError } from '../types.js';
 import { parseSha256, remoteHashCommand } from './checksum.js';
 import { runRemoteCommand, type TransferDeps } from './deps.js';
-import { classifyTransportRun, remoteFailure, transferUsage } from './errors.js';
+import { classifyTransportRun, internalFailure, remoteFailure, transferUsage } from './errors.js';
 import {
   normalizeManifestEntry,
   sortManifestEntries,
@@ -290,15 +290,28 @@ export async function probeRemoteManifest(
 
 const homeCache = new WeakMap<TransferDeps, Promise<string>>();
 
-function invalidHome(): UsageError {
-  return new UsageError('cannot determine the remote home directory', {
-    code: 'remote_manifest_failed',
-  });
+/**
+ * 携带已分类 ToolError 的异常。传输层失败必须保留 classifyTransportRun 的
+ * 分类，不能在调用方被降级为 Usage/Internal；transferErrorToToolError 会按
+ * `toolError` 属性识别并原样返回。
+ */
+function homeError(error: ToolError): Error {
+  const err = new Error(error.message);
+  err.name = 'RemoteHomeResolutionError';
+  (err as Error & { toolError?: ToolError }).toolError = error;
+  return err;
+}
+
+function invalidHome(): Error {
+  return homeError(
+    internalFailure('remote_home_resolution_failed', 'cannot determine the remote home directory'),
+  );
 }
 
 /**
  * 解析远端 home（`printf %s "$HOME"`），按 TransferDeps 缓存。
- * 结果必须是绝对路径；失败抛 remote_manifest_failed。
+ * 结果必须是绝对路径；传输失败抛携带原分类的异常，空/非法输出归为
+ * Internal remote_home_resolution_failed。
  */
 export function resolveRemoteHome(deps: TransferDeps): Promise<string> {
   if (deps.home !== undefined) return Promise.resolve(deps.home);
@@ -309,9 +322,7 @@ export function resolveRemoteHome(deps: TransferDeps): Promise<string> {
       label: `home:${deps.target.host.alias}`,
     });
     const failure = classifyTransportRun(run, { label: 'home' });
-    if (failure !== undefined) {
-      throw new UsageError(failure.message, { code: 'remote_manifest_failed' });
-    }
+    if (failure !== undefined) throw homeError(failure);
     const value = run.stdout.replace(/\r?\n$/, '');
     if (value.length === 0 || value[0] !== '/' || /[\r\n\u0000]/.test(value)) {
       throw invalidHome();

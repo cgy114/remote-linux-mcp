@@ -221,6 +221,40 @@ describe('pipeline', () => {
       expect(events).toEqual([]);
     });
 
+    it('labels pre-lease trust and prepare rejections with tool and host', async () => {
+      const trustResult = await runSshOperation({
+        ...hooks(makeConfig(), [], recordingLimiter([])),
+        toolName: 'ssh_exec',
+      });
+      expect(trustResult.isError).toBe(true);
+      expect(trustResult.structuredContent).toMatchObject({
+        tool: 'ssh_exec',
+        host: 'web1',
+        error: { retryable: expect.any(Boolean) },
+      });
+      expect(Object.keys(trustResult.structuredContent as object).sort()).toEqual([
+        'error',
+        'host',
+        'tool',
+      ]);
+
+      await installTrust();
+      const prepareResult = await runSshOperation({
+        ...hooks(makeConfig(), [], recordingLimiter([])),
+        toolName: 'ssh_exec',
+        prepare: () => {
+          throw new Error('cannot prepare');
+        },
+      });
+      expect(prepareResult.isError).toBe(true);
+      expect(Object.keys(prepareResult.structuredContent as object).sort()).toEqual([
+        'error',
+        'host',
+        'tool',
+      ]);
+      expect((prepareResult.structuredContent as { tool?: string }).tool).toBe('ssh_exec');
+    });
+
     it('runs prepare -> lease -> execute -> audit -> format -> release', async () => {
       await installTrust();
       const events: string[] = [];

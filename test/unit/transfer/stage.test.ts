@@ -78,23 +78,27 @@ describe('stage', () => {
   });
 
   describe('swapRemoteIntoPlace', () => {
-    it('moves target to backup then staged into place', async () => {
+    it('performs the whole swap in a single remote command', async () => {
       state.commands.length = 0;
-      state.results = [state.make(0), state.make(0)];
+      state.results = [state.make(0)];
       const result = await swapRemoteIntoPlace(deps, {
         staged: '/home/u/.tmp',
         target: '/home/u/target',
       });
       expect(result.ok).toBe(true);
       expect(result.rolledBack).toBe(false);
+      expect(result.restored).toBe(true);
       expect(result.backup).toMatch(/^\/home\/u\/\.remote-mcp-tmp-/);
-      expect(state.commands[0]).toContain("mv -f -- '/home/u/target'");
-      expect(state.commands[1]).toBe("mv -f -- '/home/u/.tmp' '/home/u/target'");
+      expect(state.commands).toHaveLength(1);
+      const command = state.commands[0]!;
+      expect(command).toContain("mv -f -- '/home/u/target'");
+      expect(command).toContain("mv -f -- '/home/u/.tmp' '/home/u/target'");
+      expect(command).toContain('rm -rf --');
     });
 
-    it('rolls back when the commit fails', async () => {
+    it('rolls back inside the same command when the commit fails', async () => {
       state.commands.length = 0;
-      state.results = [state.make(0), state.make(1, 'rename failed'), state.make(0)];
+      state.results = [state.make(2, 'rename failed')];
       const result = await swapRemoteIntoPlace(deps, {
         staged: '/a/.tmp',
         target: '/a/target',
@@ -102,14 +106,16 @@ describe('stage', () => {
       });
       expect(result.ok).toBe(false);
       expect(result.rolledBack).toBe(true);
+      expect(result.restored).toBe(true);
       expect(result.error?.code).toBe('remote_exit');
-      expect(state.commands).toHaveLength(3);
-      expect(state.commands[2]).toContain("mv -f -- '/a/.backup' '/a/target'");
+      expect(result.error?.details?.['stage']).toBe('commit');
+      expect(state.commands).toHaveLength(1);
+      expect(state.commands[0]).toContain("mv -f -- '/a/.backup' '/a/target' 2>/dev/null");
     });
 
-    it('reports a failed rollback', async () => {
+    it('reports a failed rollback (exit 3) without a second round trip', async () => {
       state.commands.length = 0;
-      state.results = [state.make(0), state.make(1), state.make(1)];
+      state.results = [state.make(3)];
       const result = await swapRemoteIntoPlace(deps, {
         staged: '/a/.tmp',
         target: '/a/target',
@@ -117,9 +123,12 @@ describe('stage', () => {
       });
       expect(result.ok).toBe(false);
       expect(result.rolledBack).toBe(false);
+      expect(result.restored).toBe(false);
+      expect(result.error?.details?.['stage']).toBe('rollback');
+      expect(state.commands).toHaveLength(1);
     });
 
-    it('does not commit when backing up fails', async () => {
+    it('treats a failed backup move (exit 1) as target preserved', async () => {
       state.commands.length = 0;
       state.results = [state.make(1, 'mv failed')];
       const result = await swapRemoteIntoPlace(deps, {
@@ -127,8 +136,24 @@ describe('stage', () => {
         target: '/a/target',
       });
       expect(result.ok).toBe(false);
-      expect(result.rolledBack).toBe(false);
+      expect(result.rolledBack).toBe(true);
+      expect(result.restored).toBe(true);
+      expect(result.error?.details?.['stage']).toBe('backup');
       expect(state.commands).toHaveLength(1);
+    });
+
+    it('quotes every path in the single command', async () => {
+      state.commands.length = 0;
+      state.results = [state.make(0)];
+      await swapRemoteIntoPlace(deps, {
+        staged: "/a/it's tmp",
+        target: '/a/b c',
+        backup: '/a/b"k',
+      });
+      const command = state.commands[0]!;
+      expect(command).toContain(`'/a/b c'`);
+      expect(command).toContain(`'/a/it'\\''s tmp'`);
+      expect(command).toContain(`'/a/b"k'`);
     });
 
     it('rejects roots and identical paths', async () => {

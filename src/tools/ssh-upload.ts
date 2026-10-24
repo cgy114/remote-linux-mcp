@@ -136,6 +136,7 @@ export async function sshUpload(
   return runSshOperation<UploadPlan, Awaited<ReturnType<typeof executeUpload>>>({
     input,
     ctx,
+    toolName: 'ssh_upload',
     prepare: (target) => buildUploadPlan(input, target),
     execute: ({ target, plan }) => executeUpload(makeTransferDeps(target, ctx), plan),
     classifyFailure: (facts) => classifyTransferFacts(facts),

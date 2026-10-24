@@ -126,6 +126,7 @@ export async function sshWriteFile(
   return runSshOperation<WritePlan, WriteFacts>({
     input,
     ctx,
+    toolName: 'ssh_write_file',
     prepare: (target) => buildWritePlan(input, target),
     execute: ({ target, plan }) =>
       writeRemoteFile({

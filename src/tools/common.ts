@@ -21,12 +21,17 @@ export function textResult(text: string, structured?: unknown): CallToolResult {
   return result;
 }
 
-/** 工具级错误结果（isError: true）。绝不抛出。 */
-export function toolErrorResult(err: ToolError, alias?: string): CallToolResult {
+/**
+ * 工具级错误结果（isError: true）。绝不抛出。
+ * structuredContent 统一为 `{tool?, host?, error}`，与各工具自己的失败格式一致。
+ */
+export function toolErrorResult(err: ToolError, alias?: string, tool?: string): CallToolResult {
   const result: CallToolResult = {
     content: [{ type: 'text', text: formatToolError(err, alias) }],
     isError: true,
     structuredContent: {
+      ...(tool !== undefined ? { tool } : {}),
+      ...(alias !== undefined ? { host: alias } : {}),
       error: {
         kind: err.kind,
         code: err.code,
@@ -122,7 +127,7 @@ export function registerTool<I>(server: McpServer, def: ToolDefinition<I>, ctx: 
           'tool call failed',
         );
         const alias = aliasOf(args);
-        return toolErrorResult(err, alias);
+        return toolErrorResult(err, alias, def.name);
       }
     },
   );

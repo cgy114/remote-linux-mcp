@@ -7,6 +7,7 @@ import {
   BUILTIN_REMOTE_DENY_READ,
   BUILTIN_REMOTE_DENY_WRITE,
   assertRemoteRealpath,
+  dirnameRemote,
   expandRemotePath,
   normalizeRemotePath,
 } from '../policy/remote-path.js';
@@ -77,8 +78,27 @@ function failureFacts(base: FactsBase, failure: ToolError, run?: RunResult): Tra
   };
 }
 
-/** UsageError/ConfigError -> Policy；其余 -> Internal。 */
+/** 识别携带已分类 ToolError 的异常（如 resolveRemoteHome 的传输失败）。 */
+function embeddedToolError(err: unknown): ToolError | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const candidate = (err as { toolError?: unknown }).toolError;
+  if (typeof candidate !== 'object' || candidate === null) return undefined;
+  const value = candidate as Partial<ToolError>;
+  if (
+    typeof value.kind !== 'string' ||
+    typeof value.code !== 'string' ||
+    typeof value.message !== 'string' ||
+    typeof value.retryable !== 'boolean'
+  ) {
+    return undefined;
+  }
+  return candidate as ToolError;
+}
+
+/** UsageError/ConfigError -> Policy；携带 ToolError 的异常原样返回；其余 -> Internal。 */
 export function transferErrorToToolError(err: unknown): ToolError {
+  const embedded = embeddedToolError(err);
+  if (embedded !== undefined) return embedded;
   if (err instanceof UsageError) {
     return makeToolError('Policy', {
       code: typeof err.code === 'string' && err.code !== '' ? err.code : 'policy_denied',
@@ -171,6 +191,36 @@ function requirePlainTarget(
   return undefined;
 }
 
+/**
+ * 写入目标不存在时的父目录门禁：父目录必须存在且为目录，并且其 realpath
+ * 不得命中写 deny。用于阻止 “~/etc_link/new.conf” 这类父级 symlink 写穿。
+ */
+export async function assertWritableParent(
+  deps: TransferDeps,
+  absolute: string,
+  denyWrite: readonly string[],
+  home: string,
+): Promise<ToolError | undefined> {
+  const parent = dirnameRemote(absolute);
+  const probe = await probeRemotePath(deps, parent, { realpath: true });
+  if (!probe.ok) return probe.error;
+  const facts = probe.facts;
+  if (!facts.exists) {
+    return policyFailure('target_parent_missing', 'remote target parent directory does not exist');
+  }
+  if (facts.type !== 'dir') {
+    return policyFailure('target_parent_not_directory', 'remote target parent is not a directory', {
+      type: facts.type,
+    });
+  }
+  try {
+    assertRemoteRealpath(facts.realpath ?? parent, parent, 'write', denyWrite, home);
+  } catch (err) {
+    return transferErrorToToolError(err);
+  }
+  return undefined;
+}
+
 export interface UploadSingleFileInput {
   deps: TransferDeps;
   local: LocalSource;
@@ -217,6 +267,10 @@ export async function uploadSingleFile(input: UploadSingleFileInput): Promise<Tr
       denyWrite,
       home,
     );
+    if (!facts.exists) {
+      const parentError = await assertWritableParent(deps, absolute, denyWrite, home);
+      if (parentError !== undefined) return failureFacts(base, parentError);
+    }
 
     const hash = await hashLocalFile(local.realPath);
     assertFileSize(hash.bytes, deps.limits, 'local source');
@@ -433,75 +487,97 @@ export async function downloadSingleFile(
 
     const dir = path.dirname(localTarget.path);
     const temp = newLocalTempPath(dir, 'download');
-    cleanup.addLocal(temp);
-
-    const getRun = await runSftpBatch(deps, [getStep(absolute, temp)], {
-      ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
-      label: `download:${deps.target.host.alias}`,
-    });
-    lastRun = getRun;
-    const getFailure = sftpFailure(getRun, 'sftp download');
-    if (getFailure !== undefined) return failureFacts(base, getFailure, getRun);
-
-    const verifyFailure = await verifyLocalFile(temp, {
-      sha256: facts.sha256,
-      bytes: facts.size,
-    });
-    if (verifyFailure !== undefined) return failureFacts(base, verifyFailure, getRun);
-
-    // 校验期间目标可能刚出现：提交前按 overwrite 语义再判一次。
-    const finalState = await inspectLocalTarget(localTarget.path);
-    const finalGate = localTargetGate(finalState, overwrite);
-    if (finalGate !== undefined) return failureFacts(base, finalGate, getRun);
-
-    if (facts.mode !== undefined) {
+    const tempHandle = cleanup.addLocal(temp);
+    // 先以 0600 创建本地临时文件并持有句柄；sftp get 按路径覆盖写入。
+    const handle = await fs.open(temp, 'w', 0o600);
+    let handleClosed = false;
+    const closeTempHandle = async (): Promise<void> => {
+      if (handleClosed) return;
+      handleClosed = true;
       try {
-        await fs.chmod(temp, facts.mode & 0o777);
+        await handle.close();
       } catch {
-        // Windows 等平台不支持完整权限位；内容校验才是关键。
+        // 已关闭或平台不支持；内容校验才是关键。
       }
-    }
-
-    let backupPath: string | undefined;
-    if (finalState.exists) {
-      const backup = newLocalTempPath(dir, 'backup');
-      try {
-        await replaceLocalFile(temp, localTarget.path, backup);
-      } catch (err) {
-        const preserved =
-          typeof err === 'object' && err !== null && 'backupPath' in err
-            ? String((err as { backupPath?: unknown }).backupPath)
-            : undefined;
-        if (preserved !== undefined) backupPath = preserved;
-        const error = transferErrorToToolError(err);
-        const failure =
-          backupPath !== undefined
-            ? { ...error, details: { ...(error.details ?? {}), backupPath } }
-            : error;
-        return {
-          ...failureFacts(base, failure, lastRun),
-          ...(backupPath !== undefined ? { backupPath } : {}),
-        };
-      }
-    } else {
-      await fs.rename(temp, localTarget.path);
-    }
-
-    return {
-      ok: true,
-      direction: 'download',
-      kind: 'file',
-      sourcePath: absolute,
-      targetPath: localTarget.path,
-      files: 1,
-      bytes: facts.size ?? 0,
-      sha256: facts.sha256,
-      verified: true,
-      atomicReplace: true,
-      overwritten: finalState.exists,
-      durationMs: Date.now() - base.startedAt,
-      ...(lastRun !== undefined ? { run: runFacts(lastRun) } : {}),
     };
+
+    try {
+      const getRun = await runSftpBatch(deps, [getStep(absolute, temp)], {
+        ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+        label: `download:${deps.target.host.alias}`,
+      });
+      lastRun = getRun;
+      const getFailure = sftpFailure(getRun, 'sftp download');
+      if (getFailure !== undefined) return failureFacts(base, getFailure, getRun);
+
+      const verifyFailure = await verifyLocalFile(temp, {
+        sha256: facts.sha256,
+        bytes: facts.size,
+      });
+      if (verifyFailure !== undefined) return failureFacts(base, verifyFailure, getRun);
+
+      // 校验期间目标可能刚出现：提交前按 overwrite 语义再判一次。
+      const finalState = await inspectLocalTarget(localTarget.path);
+      const finalGate = localTargetGate(finalState, overwrite);
+      if (finalGate !== undefined) return failureFacts(base, finalGate, getRun);
+
+      // rename 前关闭句柄（Windows 上打开的文件无法被替换）。
+      await closeTempHandle();
+
+      if (facts.mode !== undefined) {
+        try {
+          await fs.chmod(temp, facts.mode & 0o777);
+        } catch {
+          // Windows 等平台不支持完整权限位；内容校验才是关键。
+        }
+      }
+
+      let backupPath: string | undefined;
+      if (finalState.exists) {
+        const backup = newLocalTempPath(dir, 'backup');
+        try {
+          await replaceLocalFile(temp, localTarget.path, backup);
+        } catch (err) {
+          const preserved =
+            typeof err === 'object' && err !== null && 'backupPath' in err
+              ? String((err as { backupPath?: unknown }).backupPath)
+              : undefined;
+          if (preserved !== undefined) backupPath = preserved;
+          const error = transferErrorToToolError(err);
+          const failure =
+            backupPath !== undefined
+              ? { ...error, details: { ...(error.details ?? {}), backupPath } }
+              : error;
+          return {
+            ...failureFacts(base, failure, lastRun),
+            ...(backupPath !== undefined ? { backupPath } : {}),
+          };
+        }
+      } else {
+        await fs.rename(temp, localTarget.path);
+      }
+
+      // 临时文件已改名为目标；释放登记，避免 cleanup 再次删除。
+      cleanup.release(tempHandle);
+
+      return {
+        ok: true,
+        direction: 'download',
+        kind: 'file',
+        sourcePath: absolute,
+        targetPath: localTarget.path,
+        files: 1,
+        bytes: facts.size ?? 0,
+        sha256: facts.sha256,
+        verified: true,
+        atomicReplace: true,
+        overwritten: finalState.exists,
+        durationMs: Date.now() - base.startedAt,
+        ...(lastRun !== undefined ? { run: runFacts(lastRun) } : {}),
+      };
+    } finally {
+      await closeTempHandle();
+    }
   } catch (err) {
     return failureFacts(base, transferErrorToToolError(err), lastRun);
   } finally {

@@ -21,6 +21,7 @@ function failureResult(tool: string, host: string, failure: ToolError): CallTool
         code: failure.code,
         message: failure.message,
         hint: failure.hint,
+        retryable: failure.retryable ?? false,
         ...(failure.details !== undefined ? { details: failure.details } : {}),
       },
     },

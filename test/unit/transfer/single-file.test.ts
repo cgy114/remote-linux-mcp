@@ -26,7 +26,7 @@ const state = vi.hoisted(() => {
     events: [] as string[],
     steps: [] as string[][],
     mkRun,
-    probe: (() => ({ ok: true, facts: {} })) as () => unknown,
+    probe: ((_target: string) => ({ ok: true, facts: {} })) as (target: string) => unknown,
     verifyRemote: (() => undefined) as () => unknown,
     verifyLocal: (() => undefined) as () => unknown,
     swap: (() => ({
@@ -42,7 +42,7 @@ const state = vi.hoisted(() => {
 
 vi.mock('../../../src/transfer/probe.js', () => ({
   probeRemotePath: async (_deps: unknown, target: string) => {
-    state.events.push('probe');
+    state.events.push(target === '/home/u' ? 'probe-parent' : 'probe');
     return state.probe(target);
   },
   resolveRemoteHome: async () => '/home/u',
@@ -156,10 +156,28 @@ function localSource(file: string, mode = 0o644): LocalSource {
   };
 }
 
+function parentDirFacts(overrides: Record<string, unknown> = {}) {
+  return {
+    ok: true,
+    facts: {
+      path: '/home/u',
+      exists: true,
+      type: 'dir',
+      size: 0,
+      mode: 0o755,
+      realpath: '/home/u',
+      ...overrides,
+    },
+  };
+}
+
 function reset(): void {
   state.events.length = 0;
   state.steps.length = 0;
-  state.probe = () => probeFacts({ exists: false, type: undefined, size: undefined });
+  state.probe = (target: string) =>
+    target === '/home/u'
+      ? parentDirFacts()
+      : probeFacts({ exists: false, type: undefined, size: undefined });
   state.verifyRemote = () => undefined;
   state.verifyLocal = () => undefined;
   state.swap = () => ({
@@ -208,7 +226,13 @@ describe('single-file transfer state machines', () => {
       expect(facts.verified).toBe(true);
       expect(facts.atomicReplace).toBe(true);
       expect(facts.overwritten).toBe(false);
-      expect(state.events.slice(0, 4)).toEqual(['probe', 'put', 'verify-remote', 'swap']);
+      expect(state.events.slice(0, 5)).toEqual([
+        'probe',
+        'probe-parent',
+        'put',
+        'verify-remote',
+        'swap',
+      ]);
       // 同目录远端临时文件：put + chmod 一次 batch。
       expect(state.steps[0]).toHaveLength(2);
       expect(state.steps[0]![0]).toContain('put ');
@@ -299,6 +323,56 @@ describe('single-file transfer state machines', () => {
       );
       expect(facts.run?.exitCode).toBe(1);
     });
+
+    it('rejects a write whose parent realpath is denied (symlink write-through)', async () => {
+      state.probe = (target: string) =>
+        target === '/home/u'
+          ? parentDirFacts({ realpath: '/etc' })
+          : probeFacts({ exists: false, type: undefined, size: undefined });
+      const facts = await uploadSingleFile({
+        deps: makeDeps(),
+        local: localSource(localFile),
+        remote: '~/new.txt',
+        overwrite: false,
+      });
+      expect(facts.ok).toBe(false);
+      expect(facts.failure).toMatchObject({ kind: 'Policy', code: 'remote_denied_write' });
+      expect(state.steps).toHaveLength(0);
+      expect(state.events).toEqual(['probe', 'probe-parent']);
+    });
+
+    it('rejects a missing parent directory', async () => {
+      state.probe = (target: string) =>
+        target === '/home/u'
+          ? { ok: true, facts: { path: target, exists: false } }
+          : probeFacts({ exists: false, type: undefined, size: undefined });
+      const facts = await uploadSingleFile({
+        deps: makeDeps(),
+        local: localSource(localFile),
+        remote: '~/new.txt',
+        overwrite: false,
+      });
+      expect(facts.failure).toMatchObject({ kind: 'Policy', code: 'target_parent_missing' });
+      expect(state.steps).toHaveLength(0);
+    });
+
+    it('rejects a parent that is not a directory', async () => {
+      state.probe = (target: string) =>
+        target === '/home/u'
+          ? parentDirFacts({ type: 'symlink' })
+          : probeFacts({ exists: false, type: undefined, size: undefined });
+      const facts = await uploadSingleFile({
+        deps: makeDeps(),
+        local: localSource(localFile),
+        remote: '~/new.txt',
+        overwrite: false,
+      });
+      expect(facts.failure).toMatchObject({
+        kind: 'Policy',
+        code: 'target_parent_not_directory',
+      });
+      expect(state.steps).toHaveLength(0);
+    });
   });
 
   describe('downloadSingleFile', () => {
@@ -307,20 +381,32 @@ describe('single-file transfer state machines', () => {
       exists: false,
     });
 
-    it('gets, verifies and renames into place', async () => {
+    it('gets, verifies, closes the temp handle and renames into place', async () => {
       state.probe = () => probeFacts();
       state.downloadContent = Buffer.from('hello');
-      const facts = await downloadSingleFile({
-        deps: makeDeps(),
-        remote: '~/a.txt',
-        localTarget: localTarget(),
-        overwrite: false,
-      });
-      expect(facts.ok).toBe(true);
-      expect(facts.sha256).toBe(SHA_HELLO);
-      expect(facts.bytes).toBe(5);
-      expect(state.events.slice(0, 3)).toEqual(['probe', 'get', 'verify-local']);
-      expect(await fs.readFile(target, 'utf8')).toBe('hello');
+      const openSpy = vi.spyOn(fs, 'open');
+      try {
+        const facts = await downloadSingleFile({
+          deps: makeDeps(),
+          remote: '~/a.txt',
+          localTarget: localTarget(),
+          overwrite: false,
+        });
+        expect(facts.ok).toBe(true);
+        expect(facts.sha256).toBe(SHA_HELLO);
+        expect(facts.bytes).toBe(5);
+        expect(state.events.slice(0, 3)).toEqual(['probe', 'get', 'verify-local']);
+        expect(await fs.readFile(target, 'utf8')).toBe('hello');
+        const handle = (await openSpy.mock.results[0]!.value) as { fd: number };
+        expect(handle.fd).toBe(-1);
+      } finally {
+        openSpy.mockRestore();
+      }
+      // 改名成功后 cleanup 不得再删除临时文件，也不留下任何临时项。
+      const leftovers = (await fs.readdir(dir)).filter((name) =>
+        name.startsWith('.remote-mcp-'),
+      );
+      expect(leftovers).toEqual([]);
     });
 
     it('refuses an existing local target when overwrite is false', async () => {
@@ -406,7 +492,7 @@ describe('single-file transfer state machines', () => {
       ).toBe('remote_source_not_found');
     });
 
-    it('removes the temporary file when verification fails', async () => {
+    it('closes the temp handle and removes the temporary file when verification fails', async () => {
       state.probe = () => probeFacts();
       state.downloadContent = Buffer.from('hello');
       state.verifyLocal = () => ({
@@ -415,13 +501,20 @@ describe('single-file transfer state machines', () => {
         message: 'mismatch',
         retryable: false,
       });
-      const facts = await downloadSingleFile({
-        deps: makeDeps(),
-        remote: '~/a.txt',
-        localTarget: localTarget(),
-        overwrite: false,
-      });
-      expect(facts.ok).toBe(false);
+      const openSpy = vi.spyOn(fs, 'open');
+      try {
+        const facts = await downloadSingleFile({
+          deps: makeDeps(),
+          remote: '~/a.txt',
+          localTarget: localTarget(),
+          overwrite: false,
+        });
+        expect(facts.ok).toBe(false);
+        const handle = (await openSpy.mock.results[0]!.value) as { fd: number };
+        expect(handle.fd).toBe(-1);
+      } finally {
+        openSpy.mockRestore();
+      }
       expect(await fs.readdir(dir)).toEqual(['local.txt']);
     });
 

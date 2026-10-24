@@ -41,6 +41,7 @@ import {
 import { newRemoteTempPath, swapRemoteIntoPlace } from './stage.js';
 import { verifyFailure } from './verify.js';
 import {
+  assertWritableParent,
   runFacts,
   transferErrorToToolError,
   type TransferFacts,
@@ -260,6 +261,10 @@ export async function uploadTree(input: UploadTreeInput): Promise<TransferFacts>
       denyWrite,
       home,
     );
+    if (!facts.exists) {
+      const parentError = await assertWritableParent(deps, absolute, denyWrite, home);
+      if (parentError !== undefined) return emptyFailure(base, parentError);
+    }
 
     const staging = newRemoteTempPath(absolute);
     const stagingHandle = cleanup.addRemote(staging);
@@ -354,18 +359,23 @@ export interface DownloadTreeInput {
 interface LocalState {
   exists: boolean;
   isSymlink: boolean;
+  isDirectory: boolean;
 }
 
 async function statLocal(target: string): Promise<LocalState> {
   try {
     const stat = await fs.lstat(target);
-    return { exists: true, isSymlink: stat.isSymbolicLink() };
+    return {
+      exists: true,
+      isSymlink: stat.isSymbolicLink(),
+      isDirectory: stat.isDirectory(),
+    };
   } catch (err) {
     const code =
       typeof err === 'object' && err !== null && 'code' in err
         ? String((err as { code?: unknown }).code)
         : 'IO_ERROR';
-    if (code === 'ENOENT') return { exists: false, isSymlink: false };
+    if (code === 'ENOENT') return { exists: false, isSymlink: false, isDirectory: false };
     throw new UsageError(`cannot stat local target: ${code}`, { code: 'local_io_error' });
   }
 }
@@ -442,13 +452,21 @@ export async function downloadTree(input: DownloadTreeInput): Promise<TransferFa
 
     const localState = await statLocal(localTarget.path);
     if (localState.exists) {
-      if (localState.isSymlink) {
-        return emptyFailure(base, policyFailure('local_symlink', 'local target is a symbolic link'));
-      }
       if (!overwrite) {
         return emptyFailure(
           base,
           policyFailure('target_exists', 'local target already exists (overwrite is false)'),
+        );
+      }
+      // 目录内容不能用目录替换普通文件 / symlink。
+      if (!localState.isDirectory) {
+        return emptyFailure(
+          base,
+          policyFailure(
+            'target_type_mismatch',
+            'local target exists and is not a directory',
+            localState.isSymlink ? { type: 'symlink' } : { type: 'file' },
+          ),
         );
       }
     }

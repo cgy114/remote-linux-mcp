@@ -30,6 +30,7 @@ vi.mock('../../../src/transfer/deps.js', async (importOriginal) => {
 const { probeRemoteManifest, probeRemotePath, resolveRemoteHome } = await import(
   '../../../src/transfer/probe.js'
 );
+const { transferErrorToToolError } = await import('../../../src/transfer/single-file.js');
 
 const ABC_SHA = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad';
 
@@ -239,6 +240,77 @@ describe.skipIf(!BASH_OK)('probe (local bash simulation)', () => {
       const deps = makeDeps({ home: '/srv/home' });
       await expect(resolveRemoteHome(deps)).resolves.toBe('/srv/home');
       expect(state.homeCalls).toBe(0);
+    });
+
+    it('preserves the transport classification when home resolution fails', async () => {
+      state.executor = async (command) =>
+        command === 'printf \'%s\' "$HOME"'
+          ? runResult(255, '', 'Connection closed by 10.0.0.5')
+          : runResult(0, '', '');
+      const err: unknown = await resolveRemoteHome(makeDeps()).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      expect((err as { toolError?: unknown }).toolError).toMatchObject({
+        kind: 'RemoteExit',
+        code: 'ssh_transport_failure',
+      });
+      // 调用方（transferErrorToToolError）不得把它降级为 Policy/Internal。
+      expect(transferErrorToToolError(err)).toMatchObject({
+        kind: 'RemoteExit',
+        code: 'ssh_transport_failure',
+      });
+    });
+
+    it('preserves timeout and spawn classifications', async () => {
+      state.executor = async (command) => {
+        const base = runResult(0, '', '');
+        if (command !== 'printf \'%s\' "$HOME"') return base;
+        return { ...base, exitCode: null, timedOut: true, durationMs: 30_000 };
+      };
+      const timedOut: unknown = await resolveRemoteHome(makeDeps()).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect((timedOut as { toolError?: unknown }).toolError).toMatchObject({
+        kind: 'Timeout',
+        code: 'transfer_timeout',
+        retryable: true,
+      });
+
+      state.executor = async (command) => {
+        const base = runResult(0, '', '');
+        if (command !== 'printf \'%s\' "$HOME"') return base;
+        return { ...base, exitCode: null, spawnError: { code: 'ENOENT', message: 'missing ssh' } };
+      };
+      const spawn: unknown = await resolveRemoteHome(makeDeps()).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect((spawn as { toolError?: unknown }).toolError).toMatchObject({
+        kind: 'Internal',
+        code: 'spawn_failed',
+      });
+    });
+
+    it('maps empty or invalid home output to Internal remote_home_resolution_failed', async () => {
+      for (const value of ['', 'relative/path', '/bad\nvalue']) {
+        state.executor = async (command) =>
+          command === 'printf \'%s\' "$HOME"'
+            ? runResult(0, value, '')
+            : runResult(0, '', '');
+        const err: unknown = await resolveRemoteHome(makeDeps()).then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+        expect(err).toBeInstanceOf(Error);
+        expect((err as { toolError?: unknown }).toolError).toMatchObject({
+          kind: 'Internal',
+          code: 'remote_home_resolution_failed',
+          retryable: false,
+        });
+      }
     });
   });
 });
