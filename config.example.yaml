@@ -1,0 +1,91 @@
+# remote-mcp 配置示例
+#
+# 复制到 ~/.remote-mcp/config.yaml（或任意位置后用 --config 指定），
+# 并按注释替换 hosts 中的示例值。加载时会对本文件做严格 schema 校验：
+# 未知字段、重复键、非法正则、password 模式缺少 credential 都会直接失败。
+#
+# 校验本文件：npm run check:config -- --config config.example.yaml
+# 生成主机密钥固定记录：remote-mcp trust <alias>
+
+version: 1
+
+defaults:
+  port: 22
+  default_cwd: "~"
+  # 省略 host 参数时使用该主机。
+  default_host: web1
+  timeouts:
+    connect_ms: 5000
+    command_ms: 15000
+    check_ms: 8000
+  # 单次工具调用返回给 MCP 客户端的输出上限（1 MiB）。
+  max_output_bytes: 1048576
+
+  sudo:
+    # off | passwordless | password
+    # passwordless 使用 `sudo -n`，不会提示输入密码。
+    # password 模式必须同时设置 credential（否则加载失败），密码需先写入系统凭据库：
+    #   remote-mcp credential set sudo.web1
+    # 凭据名只是引用，不要把密码写进本文件。
+    mode: passwordless
+    # 允许 sudo 执行的命令（语法与 command_policy 相同）。
+    allow:
+      - prefix:systemctl restart nginx
+      - prefix:apt-get update
+    # 明确拒绝的命令优先于 allow。
+    deny:
+      - prefix:rm
+      - 're:\b(reboot|shutdown)\b'
+
+security:
+  # 仅接受已固定的主机密钥。首次连接前用 `remote-mcp trust <alias>` 固定。
+  host_key_policy: pinned
+
+  command_policy:
+    # off: 不启用命令策略（兼容旧配置）| enforce: 拒绝/确认/允许 | read_only: 仅允许只读白名单
+    mode: enforce
+    # true 时启用内置危险命令表；设为 false 会移除全部内置 deny 规则。
+    use_default_deny: true
+
+    # 允许执行的前缀规则；未命中 allow 的命令在 enforce 下仍然执行，
+    # 命中 deny/confirm 时分别拒绝或要求确认。
+    allow:
+      - prefix:ls
+      - prefix:cat
+      - prefix:systemctl status
+    # 需要人工确认的命令。单引号保留正则里的反斜杠。
+    confirm:
+      - 're:\b(reboot|shutdown)\b'
+    # 明确拒绝的命令（优先级最高）。
+    deny:
+      - prefix:rm
+      - 're:\bmkfs(\.\w+)?\b'
+
+  audit:
+    # 审计日志写在配置文件同目录的 audit.jsonl。
+    max_bytes: 16777216   # 16 MiB
+    retain_days: 90
+    date_rotate: true
+
+files:
+  # 本地文件读写的允许根目录（必须位于这些目录内）。~ 会展开为当前用户主目录。
+  local_roots:
+    - "~/remote-mcp-files"
+  # 远端禁止读取/写入的前缀。
+  remote_deny:
+    - "~/.ssh"
+    - "/etc"
+  max_file_bytes: 536870912      # 512 MiB
+  max_files: 10000
+  max_total_bytes: 4294967296    # 4 GiB
+  max_depth: 64
+  transfer_timeout_ms: 300000
+
+hosts:
+  web1:
+    # 示例地址（RFC 5737 文档保留网段）与用户，必须替换。
+    host: 203.0.113.10
+    user: deploy
+    identity_file: "~/.ssh/id_ed25519"
+    # 示例，必须替换为真实主机信息。
+    description: "示例，必须替换为真实地址、用户与密钥路径"

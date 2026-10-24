@@ -12,7 +12,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "check:config": "node scripts/check-config.mjs",
+    "e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e.ps1"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.3.1",

@@ -16,7 +16,7 @@ import type { ToolContext } from '../../src/tools/common.js';
 import type { RemoteConfig } from '../../src/types.js';
 
 const E2E = process.env.REMOTE_MCP_E2E === '1';
-const ALIAS = 'orangepi';
+const ALIAS = process.env.REMOTE_MCP_E2E_ALIAS ?? 'orangepi';
 const TEST_TIMEOUT_MS = 180_000;
 const SETUP_TIMEOUT_MS = 120_000;
 const IS_WIN = process.platform === 'win32';
@@ -74,7 +74,7 @@ function shq(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-describe.skipIf(!E2E)('integration: file transfer on real host (orangepi)', () => {
+describe.skipIf(!E2E)(`integration: file transfer on real host (${ALIAS})`, () => {
   let base: string;
   let localRoot: string;
   let configDir: string;
@@ -111,9 +111,32 @@ describe.skipIf(!E2E)('integration: file transfer on real host (orangepi)', () =
     await fs.mkdir(localRoot);
     await fs.mkdir(configDir);
 
-    const realDir = path.join(os.homedir(), '.remote-mcp');
-    await fs.copyFile(path.join(realDir, 'known_hosts'), path.join(configDir, 'known_hosts'));
-    await fs.copyFile(path.join(realDir, 'trusted.json'), path.join(configDir, 'trusted.json'));
+    // 从同一个配置目录复制信任数据，并从真实配置复制目标 host，使 -ConfigPath /
+    // REMOTE_MCP_CONFIG 与 REMOTE_MCP_E2E_ALIAS 都能生效。
+    const realPaths = resolvePaths({ env: process.env });
+    await fs.copyFile(realPaths.knownHostsFile, path.join(configDir, 'known_hosts'));
+    await fs.copyFile(realPaths.trustRegistryFile, path.join(configDir, 'trusted.json'));
+
+    const realConfig = await loadConfig(realPaths);
+    const hostEntry = realConfig.hosts[ALIAS];
+    if (hostEntry === undefined) {
+      throw new Error(`E2E alias "${ALIAS}" not found in ${realPaths.configFile}`);
+    }
+
+    const hostLines = [
+      `  ${ALIAS}:`,
+      `    host: ${JSON.stringify(hostEntry.host)}`,
+      `    user: ${JSON.stringify(hostEntry.user)}`,
+    ];
+    if (hostEntry.port !== undefined) {
+      hostLines.push(`    port: ${hostEntry.port}`);
+    }
+    if (hostEntry.identityFile !== undefined) {
+      hostLines.push(`    identity_file: ${JSON.stringify(hostEntry.identityFile)}`);
+    }
+    if (hostEntry.proxyJump !== undefined) {
+      hostLines.push(`    proxy_jump: ${JSON.stringify(hostEntry.proxyJump)}`);
+    }
 
     const configText = [
       'version: 1',
@@ -130,10 +153,7 @@ describe.skipIf(!E2E)('integration: file transfer on real host (orangepi)', () =
       '  max_depth: 32',
       '  transfer_timeout_ms: 120000',
       'hosts:',
-      '  orangepi:',
-      '    host: 100.115.38.14',
-      '    user: orangepi',
-      '    identity_file: "~/.ssh/id_ed25519"',
+      ...hostLines,
       '',
     ].join('\n');
     const configPath = path.join(configDir, 'config.yaml');

@@ -7,7 +7,7 @@ import type { ToolContext } from '../../src/tools/common.js';
 import type { RemoteConfig } from '../../src/types.js';
 
 const E2E = process.env.REMOTE_MCP_E2E === '1';
-const ALIAS = 'orangepi';
+const ALIAS = process.env.REMOTE_MCP_E2E_ALIAS ?? 'orangepi';
 const TIMEOUT_MS = 20_000;
 
 interface ExecStructured {
@@ -27,7 +27,7 @@ function structuredOf(result: { structuredContent?: unknown }): ExecStructured {
  * 真实主机集成测试。默认跳过；REMOTE_MCP_E2E=1 时使用真实配置、验证 ssh_exec 的
  * 退出码语义、cwd/env/stdin 透传、UTF-8 与流分离、超时。
  */
-describe.skipIf(!E2E)('integration: ssh_exec on real host (orangepi)', () => {
+describe.skipIf(!E2E)(`integration: ssh_exec on real host (${ALIAS})`, () => {
   let ctx: ToolContext;
   let config: RemoteConfig;
 

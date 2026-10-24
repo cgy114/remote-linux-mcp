@@ -12,7 +12,7 @@ import { sessionStart } from '../../src/tools/session-start.js';
 import type { RemoteConfig } from '../../src/types.js';
 
 const E2E = process.env.REMOTE_MCP_E2E === '1';
-const ALIAS = 'orangepi';
+const ALIAS = process.env.REMOTE_MCP_E2E_ALIAS ?? 'orangepi';
 const TEST_TIMEOUT_MS = 60_000;
 
 interface ToolResultLike {
@@ -122,7 +122,7 @@ async function waitFor<T>(
  * sessionStart/sessionSend/sessionClose/sessionList，覆盖状态持久、隔离、
  * 后台进程、超时、输出保真、容量上限与远端清理。
  */
-describe.skipIf(!E2E)('integration: persistent sessions on real host (orangepi)', () => {
+describe.skipIf(!E2E)(`integration: persistent sessions on real host (${ALIAS})`, () => {
   let ctx: ToolContext;
   let config: RemoteConfig;
   let remoteHome: string | undefined;

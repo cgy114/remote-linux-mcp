@@ -11,7 +11,7 @@ import type { ToolContext } from '../../src/tools/common.js';
 import type { MCPPaths, RemoteConfig } from '../../src/types.js';
 
 const E2E = process.env.REMOTE_MCP_E2E === '1';
-const ALIAS = 'orangepi';
+const ALIAS = process.env.REMOTE_MCP_E2E_ALIAS ?? 'orangepi';
 const TIMEOUT_MS = 30_000;
 
 function errorOf(result: { structuredContent?: unknown }): {
@@ -27,7 +27,7 @@ function errorOf(result: { structuredContent?: unknown }): {
  * 不请求用户密码：password 模式只验证凭据缺失时在 spawn 前失败；
  * passwordless 模式先探测 `sudo -n true`，不可用时跳过并说明原因。
  */
-describe.skipIf(!E2E)('integration: ssh_sudo on real host (orangepi)', () => {
+describe.skipIf(!E2E)(`integration: ssh_sudo on real host (${ALIAS})`, () => {
   let base: RemoteConfig;
   let paths: MCPPaths;
   let passwordlessCtx: ToolContext;

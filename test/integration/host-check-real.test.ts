@@ -8,8 +8,9 @@ import { hostList } from '../../src/tools/host-list.js';
 import type { RemoteConfig } from '../../src/types.js';
 
 const E2E = process.env.REMOTE_MCP_E2E === '1';
-const ALIAS = 'orangepi';
-const EXPECTED_FINGERPRINT = 'SHA256:+kpx3mkqNotGheru4rMG3KVrLbhebJhTb74452FHhHw';
+const ALIAS = process.env.REMOTE_MCP_E2E_ALIAS ?? 'orangepi';
+const EXPECTED_FINGERPRINT =
+  process.env.REMOTE_MCP_E2E_FINGERPRINT ?? 'SHA256:+kpx3mkqNotGheru4rMG3KVrLbhebJhTb74452FHhHw';
 
 interface HostEntry {
   alias: string;
@@ -24,10 +25,11 @@ function textOf(result: { content: Array<{ type: string; text?: string }> }): st
 
 /**
  * 真实环境集成测试。默认跳过，只有显式设置 REMOTE_MCP_E2E=1 时才连接真实主机。
- * 使用真实配置（~/.remote-mcp/config.yaml）、专用 known_hosts 与 trust registry；
+ * 使用真实配置（默认 ~/.remote-mcp/config.yaml，可由 REMOTE_MCP_CONFIG 覆盖）、
+ * 专用 known_hosts 与 trust registry；
  * 测试本身只读，不执行 trust、不写远端、不修改任何配置。
  */
-describe.skipIf(!E2E)('integration: real host (orangepi)', () => {
+describe.skipIf(!E2E)(`integration: real host (${ALIAS})`, () => {
   let ctx: ToolContext;
   let config: RemoteConfig;
 
@@ -41,7 +43,7 @@ describe.skipIf(!E2E)('integration: real host (orangepi)', () => {
     };
   }, 15_000);
 
-  it('host_list reports orangepi as trusted with the pinned fingerprint', async () => {
+  it('host_list reports the configured alias as trusted with the pinned fingerprint', async () => {
     const result = await hostList({}, ctx);
 
     expect(result.isError).not.toBe(true);
@@ -79,7 +81,7 @@ describe.skipIf(!E2E)('integration: real host (orangepi)', () => {
     expect(text).toMatch(/Policy|unknown/);
   }, 15_000);
 
-  // 用例 4：未信任路径需要一份不含 orangepi 的 registry 或 known_hosts。
+  // 用例 4：未信任路径需要一份不含该 alias 的 registry 或 known_hosts。
   // 真实环境无法在不写 ~/.remote-mcp 的前提下安全构造（ToolContext 的 paths 只接受同一目录下的
   // 固定文件名），因此按任务约束跳过，不修改真实配置。
   it.skip('host_check blocks an untrusted host before spawning ssh (skipped: would require mutating real registry)', () => {
