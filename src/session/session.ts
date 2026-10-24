@@ -53,6 +53,11 @@ export interface Session {
   send(input: SessionSendInput): Promise<SessionSendResult>;
   /** 幂等；永不 reject。 */
   close(reason?: string): Promise<CloseFacts>;
+  /**
+   * 注册一个在会话进入 closed 后调用一次的回调（登记簿用它自动释放名额）。
+   * 若注册时会话已关闭，回调会在微任务中补发一次；回调异常被吞掉并记录 warn。
+   */
+  addClosedListener(listener: (sessionId: SessionId) => void): void;
 }
 
 export interface CreateSessionOptions {
@@ -75,6 +80,11 @@ export interface CreateSessionOptions {
   defaultTimeoutMs?: number;
   /** 未指定 maxOutputBytes 且 target 无默认值时的兜底。 */
   defaultMaxOutputBytes?: number;
+  /**
+   * 会话进入 closed 后调用一次（所有路径：显式 close、idle、timeout、
+   * protocol_error、transport_exit）。幂等；异常被吞掉并记录 warn。
+   */
+  onClosed?: (sessionId: SessionId) => void;
 }
 
 interface QueueEntry {
@@ -143,6 +153,31 @@ export function createSession(opts: CreateSessionOptions): Session {
   let commandsRun = 0;
   let outputBytes = 0;
   let truncatedAny = false;
+  let closedNotified = false;
+  const closedListeners: Array<(sessionId: SessionId) => void> = [];
+  if (opts.onClosed !== undefined) closedListeners.push(opts.onClosed);
+
+  const invokeClosedListener = (listener: (sessionId: SessionId) => void): void => {
+    try {
+      listener(id);
+    } catch (err) {
+      try {
+        log.warn(
+          { err: err instanceof Error ? err.message : String(err) },
+          'session onClosed listener failed',
+        );
+      } catch {
+        // 日志失败不影响关闭
+      }
+    }
+  };
+
+  /** 进入 closed 后恰好通知一次；登记簿删除等副作用都放在这里。 */
+  const notifyClosed = (): void => {
+    if (closedNotified) return;
+    closedNotified = true;
+    for (const listener of closedListeners) invokeClosedListener(listener);
+  };
 
   const clearIdle = (): void => {
     if (idleTimer !== undefined) {
@@ -451,6 +486,7 @@ export function createSession(opts: CreateSessionOptions): Session {
     };
     state = 'closed';
     lastActivity = Date.now();
+    notifyClosed();
     return closeFacts;
   }
 
@@ -497,6 +533,14 @@ export function createSession(opts: CreateSessionOptions): Session {
     },
     send,
     close,
+    addClosedListener(listener: (sessionId: SessionId) => void): void {
+      if (closedNotified || state === 'closed') {
+        // 已关闭：补发一次，保持「注册后必被通知」的语义。
+        queueMicrotask(() => invokeClosedListener(listener));
+        return;
+      }
+      closedListeners.push(listener);
+    },
   };
 
   transport.attach(handleEvent);

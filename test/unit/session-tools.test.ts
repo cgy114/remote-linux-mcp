@@ -102,6 +102,8 @@ function makeFakeSession(options: {
 } = {}): Session {
   const id = options.id ?? 'sess_fake';
   const destination = options.destination ?? 'tester@example.test:22';
+  const listeners: Array<(sessionId: string) => void> = [];
+  const closeImpl: Session['close'] = options.close ?? (async () => CLOSE_FACTS);
   const snapshot: Snapshot = {
     id,
     destination,
@@ -127,7 +129,16 @@ function makeFakeSession(options: {
     send: options.send ?? (async () => {
       throw new Error('send should not be called');
     }),
-    close: options.close ?? (async () => CLOSE_FACTS),
+    async close(reason?: string): Promise<CloseFacts> {
+      try {
+        return await closeImpl(reason);
+      } finally {
+        for (const listener of listeners) listener(id);
+      }
+    },
+    addClosedListener(listener: (sessionId: string) => void): void {
+      listeners.push(listener);
+    },
   };
 }
 

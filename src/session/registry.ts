@@ -113,6 +113,12 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}): Ses
         throw new UsageError(`session ${session.id} already exists`, { code: 'session_exists' });
       }
       sessions.set(session.id, session);
+      // 会话因 idle/timeout/protocol_error/transport_exit 自关闭时自动移除，
+      // 立即释放全局与 per-destination 名额。delete 幂等；closeAll 已先清空
+      // 登记簿，此时这里只是空操作，不会抛异常。
+      session.addClosedListener((closedId) => {
+        if (sessions.get(closedId) === session) sessions.delete(closedId);
+      });
     },
 
     abortStart(reservation: SessionReservation): void {
@@ -127,6 +133,7 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}): Ses
       return [...sessions.values()];
     },
 
+    /** 幂等移除会话（Map.delete 语义）；计数由登记簿内容推导，删除即释放名额。 */
     delete(id: SessionId): boolean {
       return sessions.delete(id);
     },

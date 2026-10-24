@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createSessionRegistry } from '../../src/session/registry.js';
 import { createSession, type CreateSessionOptions, type Session } from '../../src/session/session.js';
 import type {
   SessionTransport,
@@ -306,5 +307,166 @@ describe('createSession close semantics', () => {
     expect(maxActive).toBe(1);
 
     await session.close();
+  });
+});
+
+describe('createSession closed notification', () => {
+  it('invokes onClosed exactly once on explicit close', async () => {
+    const calls: string[] = [];
+    const { session } = makeSession({ onClosed: (sessionId) => calls.push(sessionId) });
+
+    await session.close('explicit');
+    expect(calls).toEqual(['sess_test']);
+
+    await session.close('again');
+    expect(calls).toEqual(['sess_test']);
+  });
+
+  it('invokes onClosed when a command times out', async () => {
+    const calls: string[] = [];
+    const { session, transport } = makeSession({
+      defaultTimeoutMs: 10,
+      onClosed: (sessionId) => calls.push(sessionId),
+    });
+
+    const pending = session.send({ command: 'sleep 999' });
+    await until(() => transport.written.length === 1);
+    expect((await pending).outcome.status).toBe('timeout');
+
+    await until(() => session.state === 'closed');
+    expect(calls).toEqual(['sess_test']);
+  });
+
+  it('invokes onClosed on a protocol error', async () => {
+    const calls: string[] = [];
+    const { session, transport } = makeSession({ onClosed: (sessionId) => calls.push(sessionId) });
+
+    const pending = session.send({ command: 'x' });
+    await until(() => transport.written.length === 1);
+    transport.emit({ type: 'frame', frame: { type: 'E', seq: 1, rc: 0 } });
+    await pending;
+
+    await until(() => session.state === 'closed');
+    expect(calls).toEqual(['sess_test']);
+  });
+
+  it('invokes onClosed when the transport exits', async () => {
+    const calls: string[] = [];
+    const { session, transport } = makeSession({ onClosed: (sessionId) => calls.push(sessionId) });
+
+    transport.die(255);
+    await until(() => session.state === 'closed');
+    expect(calls).toEqual(['sess_test']);
+  });
+
+  it('invokes onClosed on idle timeout', async () => {
+    const calls: string[] = [];
+    const { session } = makeSession({
+      idleTimeoutMs: 10,
+      onClosed: (sessionId) => calls.push(sessionId),
+    });
+
+    await until(() => session.state === 'closed');
+    expect(calls).toEqual(['sess_test']);
+  });
+
+  it('delivers the callback to listeners registered after the session closed', async () => {
+    const { session } = makeSession({ idleTimeoutMs: 10 });
+    await until(() => session.state === 'closed');
+
+    const calls: string[] = [];
+    session.addClosedListener((sessionId) => calls.push(sessionId));
+    expect(calls).toEqual([]);
+    await tick();
+    expect(calls).toEqual(['sess_test']);
+  });
+
+  it('never rejects close when the callback throws', async () => {
+    const { session } = makeSession({
+      onClosed: () => {
+        throw new Error('boom');
+      },
+    });
+
+    await expect(session.close()).resolves.toBeDefined();
+    expect(session.state).toBe('closed');
+  });
+});
+
+describe('createSession + registry: self-close releases capacity', () => {
+  const DEST = 'u@example.test:22';
+
+  it('removes a timed-out session and frees the per-destination slot', async () => {
+    const registry = createSessionRegistry({ maxGlobal: 4, maxPerDest: 1 });
+    const { session, transport } = makeSession({ id: 'sess_reg_timeout', defaultTimeoutMs: 10 });
+    registry.beginStart(DEST).commit(session);
+    expect(registry.list()).toHaveLength(1);
+
+    const pending = session.send({ command: 'sleep 999' });
+    await until(() => transport.written.length === 1);
+    expect((await pending).outcome.status).toBe('timeout');
+
+    await until(() => registry.list().length === 0);
+    expect(registry.get('sess_reg_timeout')).toBeUndefined();
+    expect(transport.closeCalls).toBe(1);
+    expect(() => registry.beginStart(DEST)).not.toThrow();
+  });
+
+  it('removes a session whose transport exits unexpectedly', async () => {
+    const registry = createSessionRegistry({ maxGlobal: 4, maxPerDest: 1 });
+    const { session, transport } = makeSession({ id: 'sess_reg_exit' });
+    registry.beginStart(DEST).commit(session);
+
+    const pending = session.send({ command: 'long' });
+    await until(() => transport.written.length === 1);
+    transport.die(2);
+    await pending;
+
+    await until(() => registry.list().length === 0);
+    expect(registry.get('sess_reg_exit')).toBeUndefined();
+    expect(() => registry.beginStart(DEST)).not.toThrow();
+  });
+
+  it('removes a session that hits a protocol error', async () => {
+    const registry = createSessionRegistry({ maxGlobal: 4, maxPerDest: 1 });
+    const { session, transport } = makeSession({ id: 'sess_reg_proto' });
+    registry.beginStart(DEST).commit(session);
+
+    const pending = session.send({ command: 'x' });
+    await until(() => transport.written.length === 1);
+    transport.emit({ type: 'frame', frame: { type: 'E', seq: 1, rc: 0 } });
+    await pending;
+
+    await until(() => registry.list().length === 0);
+    expect(registry.get('sess_reg_proto')).toBeUndefined();
+    expect(() => registry.beginStart(DEST)).not.toThrow();
+  });
+
+  it('removes a session that idles out', async () => {
+    const registry = createSessionRegistry({ maxGlobal: 4, maxPerDest: 1 });
+    const { session } = makeSession({ id: 'sess_reg_idle', idleTimeoutMs: 10 });
+    registry.beginStart(DEST).commit(session);
+
+    await until(() => session.state === 'closed');
+    await until(() => registry.list().length === 0);
+    expect(registry.size).toBe(0);
+  });
+
+  it('closeAll clears the registry without errors from late removals', async () => {
+    const registry = createSessionRegistry({ maxGlobal: 4, maxPerDest: 4 });
+    const a = makeSession({ id: 'sess_reg_a' });
+    const b = makeSession({ id: 'sess_reg_b' });
+    registry.beginStart(DEST).commit(a.session);
+    registry.beginStart(DEST).commit(b.session);
+    expect(registry.size).toBe(2);
+
+    await expect(registry.closeAll('shutdown', 1000)).resolves.toBeUndefined();
+
+    expect(registry.size).toBe(0);
+    expect(registry.list()).toEqual([]);
+    expect(a.session.state).toBe('closed');
+    expect(b.session.state).toBe('closed');
+    expect(a.transport.closeCalls).toBe(1);
+    expect(b.transport.closeCalls).toBe(1);
   });
 });

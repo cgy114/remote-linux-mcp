@@ -26,6 +26,7 @@ function fakeSession(
   destination: string,
   close: (reason: string) => Promise<CloseFacts> = async () => CLOSE_FACTS,
 ): Session {
+  const listeners: Array<(sessionId: string) => void> = [];
   const snapshot: Snapshot = {
     id,
     destination,
@@ -50,7 +51,16 @@ function fakeSession(
     send: async () => {
       throw new Error('unused');
     },
-    close,
+    async close(reason: string): Promise<CloseFacts> {
+      try {
+        return await close(reason);
+      } finally {
+        for (const listener of listeners) listener(id);
+      }
+    },
+    addClosedListener(listener: (sessionId: string) => void): void {
+      listeners.push(listener);
+    },
   };
 }
 
@@ -104,6 +114,21 @@ describe('createSessionRegistry capacity', () => {
   it('exposes the configured queue cap', () => {
     expect(createSessionRegistry({ maxQueue: 3 }).maxQueue).toBe(3);
     expect(createSessionRegistry().maxQueue).toBe(8);
+  });
+
+  it('removes a self-closed session from the registry and frees its slot', async () => {
+    const registry = createSessionRegistry({ maxGlobal: 8, maxPerDest: 1 });
+    const session = fakeSession('sess_self', 'u@a:22');
+    registry.beginStart('u@a:22').commit(session);
+    expect(registry.list()).toEqual([session]);
+
+    await session.close('idle_timeout');
+
+    expect(registry.get('sess_self')).toBeUndefined();
+    expect(registry.list()).toEqual([]);
+    expect(registry.size).toBe(0);
+    expect(registry.delete('sess_self')).toBe(false);
+    expect(() => registry.beginStart('u@a:22')).not.toThrow();
   });
 });
 
