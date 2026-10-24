@@ -249,6 +249,93 @@ describe('ssh_sudo unit', () => {
     expect(remote).toContain('id -u');
   });
 
+  it.each([
+    ['sudo -u nobody id', 'nobody'],
+    ['sudo --user nobody id', 'nobody'],
+    ['sudo -g nogroup id', '-g'],
+    ['sudo -D /tmp id', '-D'],
+    ['su -c id nobody', 'nobody'],
+    ['doas -u nobody id', '-u'],
+    ['pkexec --user nobody id', '--user'],
+  ])(
+    'rejects %j before spawning and explains why stripping is unsafe',
+    async (command, needle) => {
+      await installTrust();
+
+      const result = await sshSudo({ host: 'web1', command }, ctx);
+      expect(result.isError).toBe(true);
+      expect(errorOf(result)).toMatchObject({ kind: 'Policy', code: 'policy_denied' });
+      expect(runSshMock).not.toHaveBeenCalled();
+
+      const structured = result.structuredContent as {
+        error: { hint?: string; details?: Record<string, unknown> };
+      };
+      expect(structured.error.details).toMatchObject({
+        action: 'deny',
+        code: 'policy_denied',
+        surface: 'ssh_sudo',
+      });
+      expect(String(structured.error.details?.['ruleId'])).toMatch(/^hard-/);
+      expect(String(structured.error.details?.['stripReason'])).toContain(needle);
+      expect(String(structured.error.hint)).toContain(needle);
+
+      const records = await auditRecords();
+      expect(records[0]).toMatchObject({
+        tool: 'ssh_sudo',
+        outcome: 'denied',
+        denied: true,
+        failureCode: 'policy_denied',
+        failureKind: 'Policy',
+        commandSha256: createHash('sha256').update(command).digest('hex'),
+      });
+    },
+  );
+
+  it('rejects unsafe prefixes even when command policy is disabled', async () => {
+    await setup(
+      configYaml({
+        sudoMode: 'passwordless',
+        commandPolicy: '  command_policy:\n    mode: off',
+      }),
+    );
+    await installTrust();
+
+    const result = await sshSudo(
+      { host: 'web1', command: 'sudo -u nobody id' },
+      ctx,
+    );
+    expect(result.isError).toBe(true);
+    expect(errorOf(result)).toMatchObject({ kind: 'Policy', code: 'policy_denied' });
+    expect(runSshMock).not.toHaveBeenCalled();
+
+    const structured = result.structuredContent as {
+      error: { hint?: string; details?: Record<string, unknown> };
+    };
+    expect(structured.error.details?.['ruleId']).toBe('hard-sudo');
+    expect(String(structured.error.hint)).toContain('nobody');
+  });
+
+  it('audits the hash of the stripped command actually executed', async () => {
+    await installTrust();
+    runSshMock.mockResolvedValue(makeRun());
+
+    const result = await sshSudo({ host: 'web1', command: 'sudo -n id' }, ctx);
+    expect(result.isError).not.toBe(true);
+
+    const call = runSshMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    const argv = call['argv'] as string[];
+    const remote = argv[argv.length - 1] ?? '';
+    expect(remote).not.toContain('sudo -n id');
+    expect(remote.endsWith("id'")).toBe(true);
+
+    const records = await auditRecords();
+    expect(records[0]).toMatchObject({
+      tool: 'ssh_sudo',
+      commandSha256: createHash('sha256').update('id').digest('hex'),
+      commandBytes: 2,
+    });
+  });
+
   it('runs passwordless sudo with -n and no stdin', async () => {
     await installTrust();
     runSshMock.mockResolvedValue(makeRun());

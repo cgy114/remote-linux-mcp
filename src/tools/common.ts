@@ -64,7 +64,12 @@ export function policyError(e: UsageError | ConfigError): ToolError {
     e instanceof UsageError
       ? (e as UsageError & { details?: Record<string, unknown> }).details
       : undefined;
-  if (details !== undefined) error.details = details;
+  if (details !== undefined) {
+    error.details = details;
+    // 策略层可在 details.hint 中提供更具体的说明（如 ssh_sudo 的剥离拒绝原因）。
+    const detailHint = details['hint'];
+    if (typeof detailHint === 'string') error.hint = detailHint;
+  }
   return error;
 }
 

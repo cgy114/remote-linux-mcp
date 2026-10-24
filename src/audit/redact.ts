@@ -16,8 +16,13 @@ const GITHUB_TOKEN_RE = /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]
 const AWS_ACCESS_KEY_RE = /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[A-Z0-9]{16}\b/g;
 const URL_USERINFO_RE = /(\b[a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^/\s@]+)@/gi;
 const PROXY_COMMAND_RE = /(ProxyCommand=)(?:"[^"]*"|'[^']*'|[^\n]*)/gi;
+/**
+ * `key = value` / `key: value` 赋值。键名允许前后缀（如 aws_secret_access_key、
+ * AWS_SESSION_TOKEN、my_api_key），避免只匹配独立单词；也覆盖裸 secret/token 等。
+ * 值匹配到空白或行尾（引号包裹时整体替换）。键名整体保留，只替换值。
+ */
 const ASSIGNMENT_RE =
-  /\b(password|passwd|pwd|passphrase|secret|token|api[_-]?key|x-api-key|access[_-]?key|private[_-]?key)\s*([:=])\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi;
+  /\b([A-Za-z0-9_]*(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_]*)\s*([:=])\s*("[^"]*"|'[^']*'|[^\s]+)/gi;
 
 /** 对单个字符串做模式脱敏。 */
 export function redactAuditText(text: string): string {

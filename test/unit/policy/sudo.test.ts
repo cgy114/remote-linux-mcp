@@ -158,34 +158,87 @@ describe('stripLeadingSudoCommand', () => {
     ['sudo systemctl restart nginx', 'systemctl restart nginx'],
     ['sudo -n id', 'id'],
     ['sudo -S -k -- id', 'id'],
+    ['sudo -nS id', 'id'],
+    ['sudo -p "Password:" id', 'id'],
     ['sudo -u root systemctl status', 'systemctl status'],
     ['sudo --user=root systemctl status', 'systemctl status'],
-    ['doas -u root id', 'id'],
-    ['pkexec --user root id', 'id'],
+    ['sudo --user root systemctl status', 'systemctl status'],
     ['/usr/bin/sudo -n id', 'id'],
     ['su -c "systemctl status"', 'systemctl status'],
     ['su -c id', 'id'],
+    ['su -c id; ls', 'id; ls'],
     ['FOO=1 sudo id', 'FOO=1 id'],
     ['command sudo id', 'command id'],
     ['sudo id; ls', 'id; ls'],
-  ])('strips %j -> %j', (command, expected) => {
-    expect(stripLeadingSudoCommand(command)).toBe(expected);
+  ])('strips safe prefix %j -> %j', (command, expected) => {
+    expect(stripLeadingSudoCommand(command)).toEqual({
+      command: expected,
+      stripped: true,
+    });
   });
 
   it('leaves non-sudo commands untouched', () => {
-    expect(stripLeadingSudoCommand('systemctl status')).toBe('systemctl status');
-    expect(stripLeadingSudoCommand('ls && sudo reboot')).toBe('ls && sudo reboot');
+    for (const command of ['systemctl status', 'ls && sudo reboot']) {
+      expect(stripLeadingSudoCommand(command)).toEqual({ command, stripped: false });
+    }
   });
 
-  it('refuses unsafe/ambiguous prefixes instead of changing semantics', () => {
-    // sudo 没有内部命令。
-    expect(stripLeadingSudoCommand('sudo -n')).toBe('sudo -n');
-    expect(stripLeadingSudoCommand('sudo')).toBe('sudo');
-    // 选项缺少参数。
-    expect(stripLeadingSudoCommand('sudo -u')).toBe('sudo -u');
-    // su 依赖登录 shell / 用户语义，只有 -c 形式可安全剥离。
-    expect(stripLeadingSudoCommand('su -')).toBe('su -');
-    expect(stripLeadingSudoCommand('su root')).toBe('su root');
-    expect(stripLeadingSudoCommand('su - root -c id')).toBe('su - root -c id');
+  it.each([
+    // sudo: 非 root 身份 / 组 / 目录 / SELinux / fd / host / 其他用户 / chroot
+    'sudo -u nobody id',
+    'sudo --user nobody id',
+    'sudo --user=nobody id',
+    'sudo -g nogroup id',
+    'sudo --group=nogroup id',
+    'sudo -D /tmp id',
+    'sudo --chdir=/tmp id',
+    'sudo -r unconfined_r id',
+    'sudo -t unconfined_t id',
+    'sudo -C 3 id',
+    'sudo -h otherhost id',
+    'sudo -U nobody id',
+    'sudo -R /tmp id',
+    'sudo -n -u nobody id',
+    // su: 目标用户位置参数 / 其他选项
+    'su -c id nobody',
+    'su root -c id',
+    'su - root -c id',
+    'su -c id -s /bin/sh',
+    // doas / pkexec: 切换用户（即使目标是 root 也不剥离）
+    'doas -u nobody id',
+    'doas -u root id',
+    'pkexec --user nobody id',
+    'pkexec --user root id',
+    // 缺少内部命令 / 缺少选项参数
+    'sudo',
+    'sudo -n',
+    'sudo --',
+    'sudo -u',
+    'sudo --user',
+    'sudo --prompt',
+    'su -',
+    'su root',
+    // 前缀保留：环境赋值不能在拒绝时被丢弃
+    'FOO=1 sudo -u nobody id',
+  ])('refuses to change semantics of %j', (command) => {
+    const result = stripLeadingSudoCommand(command);
+    expect(result.command).toBe(command);
+    expect(result.stripped).toBe(false);
+    expect(typeof result.reason).toBe('string');
+    expect(result.reason?.length).toBeGreaterThan(0);
+    expect(result.ruleId).toMatch(/^hard-(sudo|su|doas|pkexec)$/);
+  });
+
+  it('reports the unsafe option/identity in the refusal reason', () => {
+    expect(stripLeadingSudoCommand('sudo -u nobody id').reason).toContain('nobody');
+    expect(stripLeadingSudoCommand('sudo -g nogroup id').reason).toContain('-g');
+    expect(stripLeadingSudoCommand('sudo -D /tmp id').reason).toContain('-D');
+    expect(stripLeadingSudoCommand('su -c id nobody').reason).toContain('nobody');
+    expect(stripLeadingSudoCommand('doas -u nobody id').reason).toContain('-u');
+    expect(stripLeadingSudoCommand('pkexec --user nobody id').reason).toContain('--user');
+    expect(stripLeadingSudoCommand('sudo -u nobody id').ruleId).toBe('hard-sudo');
+    expect(stripLeadingSudoCommand('su -c id nobody').ruleId).toBe('hard-su');
+    expect(stripLeadingSudoCommand('doas -u nobody id').ruleId).toBe('hard-doas');
+    expect(stripLeadingSudoCommand('pkexec --user nobody id').ruleId).toBe('hard-pkexec');
   });
 });

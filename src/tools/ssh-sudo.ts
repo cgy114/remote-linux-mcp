@@ -8,6 +8,7 @@ import {
   type CredentialProvider,
   type SecretMaterial,
 } from '../credentials/index.js';
+import { UsageError } from '../errors/classes.js';
 import { makeToolError } from '../errors/taxonomy.js';
 import {
   assertCommandPolicy,
@@ -24,6 +25,7 @@ import {
   composeSudoStdin,
   stripLeadingSudoCommand,
   type SudoRemotePlan,
+  type SudoStripResult,
 } from '../policy/sudo.js';
 import { runSshOperation } from '../pipeline/operation.js';
 import { runSshCommand } from '../pipeline/run-command.js';
@@ -128,6 +130,38 @@ function sudoErrorResult(err: ToolError, alias: string, sudoMode: string): CallT
   return result;
 }
 
+/** 不能安全剥离时，把原因附加到策略拒绝的 details 与 message。 */
+export function attachStripReason(err: unknown, strip: SudoStripResult): unknown {
+  if (strip.reason === undefined) return err;
+  if (!(err instanceof UsageError)) return err;
+  const target = err as UsageError & { details?: Record<string, unknown> };
+  target.details = {
+    ...(target.details ?? {}),
+    hint: strip.reason,
+    stripReason: strip.reason,
+  };
+  if (!target.message.includes(strip.reason)) {
+    target.message = `${target.message}：${strip.reason}`;
+  }
+  return target;
+}
+
+/** 策略本身放行（例如 command_policy.mode=off）时，仍拒绝语义会被改变的前缀。 */
+export function stripRefusalError(strip: SudoStripResult): UsageError {
+  const reason = strip.reason ?? '无法安全剥离前导提权命令';
+  const err = new UsageError(`不允许直接调用提权命令：${reason}`, { code: 'policy_denied' });
+  (err as UsageError & { details?: Record<string, unknown> }).details = {
+    action: 'deny',
+    code: 'policy_denied',
+    ruleId: strip.ruleId ?? 'hard-sudo',
+    surface: 'ssh_sudo',
+    reason: '不允许直接调用提权命令',
+    hint: reason,
+    stripReason: reason,
+  };
+  return err;
+}
+
 /**
  * ssh_sudo：在已信任主机上通过 sudo 执行命令。
  *
@@ -146,17 +180,27 @@ export async function sshSudo(input: SshSudoInput, ctx: ToolContext): Promise<Ca
       toolName: 'ssh_sudo',
       prepare: async (target) => {
         const policy = target.config.security.commandPolicy;
-        // ssh_sudo 本身已经提权；允许用户传入 `sudo ...` 并剥掉冗余前缀，
-        // 否则 hard-sudo 会误拒，远端也会形成嵌套 sudo。
-        const command = stripLeadingSudoCommand(input.command);
+        // ssh_sudo 本身已经提权；只剥离语义安全的前导 sudo 前缀。
+        // 会改变身份/环境的选项（-u nobody、-g、-D、doas -u...）原样保留，
+        // 让 hard-* 规则拒绝，绝不静默以 root 执行。
+        const strip = stripLeadingSudoCommand(input.command);
+        const command = strip.command;
 
-        assertCommandPolicy(
-          evaluateCommandPolicy({
-            command,
-            policy,
-            surface: 'ssh_sudo',
-          }),
-        );
+        try {
+          assertCommandPolicy(
+            evaluateCommandPolicy({
+              command,
+              policy,
+              surface: 'ssh_sudo',
+            }),
+          );
+        } catch (err) {
+          throw attachStripReason(err, strip);
+        }
+        if (strip.reason !== undefined) {
+          // 策略放行（如 mode=off）也不允许改变语义。
+          throw stripRefusalError(strip);
+        }
 
         assertCommandPolicy(
           evaluateSudoPolicy({

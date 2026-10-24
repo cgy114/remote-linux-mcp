@@ -56,6 +56,41 @@ describe('redactAuditText', () => {
     const text = 'alias=web1 exit=0 duration_ms=42';
     expect(redactAuditText(text)).toBe(text);
   });
+
+  it.each([
+    ['aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'wJalrXUtnFEMI'],
+    ['AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'wJalrXUtnFEMI'],
+    ['aws_session_token=FwoGZXIvYXdzEBYaDexample', 'FwoGZXIvYXdzEBYaDexample'],
+    ['AWS_SESSION_TOKEN: FwoGZXIvYXdzEBYaDexample', 'FwoGZXIvYXdzEBYaDexample'],
+    ['aws_access_key_id=AKIAIOSFODNN7EXAMPLE', 'AKIAIOSFODNN7EXAMPLE'],
+    ['AWS_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE', 'AKIAIOSFODNN7EXAMPLE'],
+    ['my_api_key=xyz789', 'xyz789'],
+    ['db_password: hunter2', 'hunter2'],
+    ['client_secret = s3cr3t-value', 's3cr3t-value'],
+    ['refresh_token="rt-abc123"', 'rt-abc123'],
+  ])('redacts AWS/generic assignment %j', (text, canary) => {
+    const out = redactAuditText(text);
+    expect(out).toContain('[REDACTED]');
+    expect(out, `leaked ${canary}`).not.toContain(canary);
+  });
+
+  it('keeps the key name while replacing the value', () => {
+    expect(redactAuditText('aws_secret_access_key=abc123')).toBe(
+      'aws_secret_access_key=[REDACTED]',
+    );
+    expect(redactAuditText('AWS_SECRET_ACCESS_KEY: abc123')).toBe(
+      'AWS_SECRET_ACCESS_KEY:[REDACTED]',
+    );
+  });
+
+  it('does not mistake hashes, fingerprints or ordinary hex for secrets', () => {
+    const text =
+      'commandSha256=deadbeef0123456789 ' +
+      'SHA256:abc123def456 ' +
+      'fingerprint=0011aabbccdd ' +
+      'sha256=deadbeef';
+    expect(redactAuditText(text)).toBe(text);
+  });
 });
 
 describe('redactAuditRecord', () => {
