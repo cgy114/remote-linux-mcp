@@ -105,6 +105,31 @@ export function validateCwd(cwd: unknown): string {
   return assertRemoteCwd(cwd);
 }
 
+/**
+ * 校验远端 env 块：对象映射、≤64 条、键必须匹配 `/^[A-Za-z_][A-Za-z0-9_]*$/`
+ * 且不是原型键、值不允许 NUL/孤立 surrogate、键值 UTF-8 合计 ≤16 KiB。
+ * `undefined` 视为未提供。失败抛 invalid_env。
+ */
+export function validateRemoteEnv(env: unknown): void {
+  if (env === undefined) return;
+  if (typeof env !== 'object' || env === null || Array.isArray(env)) {
+    throw usage('invalid_env', 'env must be an object mapping names to string values');
+  }
+  const entries = Object.entries(env);
+  if (entries.length > MAX_ENV_ENTRIES) {
+    throw usage('invalid_env', `at most ${MAX_ENV_ENTRIES} environment variables are allowed`);
+  }
+  let totalBytes = 0;
+  for (const [key, value] of entries) {
+    assertEnvKey(key);
+    const v = assertEnvValue(key, value);
+    totalBytes += Buffer.byteLength(key, 'utf8') + Buffer.byteLength(v, 'utf8');
+  }
+  if (totalBytes > MAX_ENV_BYTES) {
+    throw usage('invalid_env', `environment block exceeds ${MAX_ENV_BYTES} UTF-8 bytes`);
+  }
+}
+
 /** 校验 exec 输入；cwd 省略时不校验 cwd。任何失败都以带 code 的 UsageError 抛出。 */
 export function validateExecInput(input: ExecValidationInput): void {
   const { command } = input;
@@ -136,25 +161,7 @@ export function validateExecInput(input: ExecValidationInput): void {
     }
   }
 
-  const env = input.env;
-  if (env !== undefined) {
-    if (typeof env !== 'object' || env === null || Array.isArray(env)) {
-      throw usage('invalid_env', 'env must be an object mapping names to string values');
-    }
-    const entries = Object.entries(env);
-    if (entries.length > MAX_ENV_ENTRIES) {
-      throw usage('invalid_env', `at most ${MAX_ENV_ENTRIES} environment variables are allowed`);
-    }
-    let totalBytes = 0;
-    for (const [key, value] of entries) {
-      assertEnvKey(key);
-      const v = assertEnvValue(key, value);
-      totalBytes += Buffer.byteLength(key, 'utf8') + Buffer.byteLength(v, 'utf8');
-    }
-    if (totalBytes > MAX_ENV_BYTES) {
-      throw usage('invalid_env', `environment block exceeds ${MAX_ENV_BYTES} UTF-8 bytes`);
-    }
-  }
+  validateRemoteEnv(input.env);
 
   if (input.cwd !== undefined) validateCwd(input.cwd);
 }

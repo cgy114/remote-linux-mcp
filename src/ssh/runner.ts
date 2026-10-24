@@ -45,7 +45,7 @@ export async function killAllTrackedChildren(): Promise<void> {
 // ---------- UTF-8 边界安全的截断 ----------
 
 /** 去掉末尾不完整的 UTF-8 字符（只看 buffer 自身）。 */
-function trimIncompleteTail(b: Buffer): Buffer {
+export function trimIncompleteTail(b: Buffer): Buffer {
   const len = b.length;
   for (let i = len - 1; i >= Math.max(0, len - 4); i--) {
     const c = b[i]!;
@@ -57,7 +57,7 @@ function trimIncompleteTail(b: Buffer): Buffer {
 }
 
 /** 去掉开头不属于完整字符的续字节。 */
-function trimLeadingPartial(b: Buffer): Buffer {
+export function trimLeadingPartial(b: Buffer): Buffer {
   const limit = Math.min(4, b.length);
   for (let i = 0; i < limit; i++) {
     if ((b[i]! & 0xc0) !== 0x80) return b.subarray(i);
