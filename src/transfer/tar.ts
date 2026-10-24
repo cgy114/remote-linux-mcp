@@ -1,3 +1,4 @@
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { UsageError } from '../errors/classes.js';
 import { basenameRemote, dirnameRemote, renderRemoteShellPath } from '../policy/remote-path.js';
@@ -39,12 +40,61 @@ export function buildRemoteTarCreateCommand(
   return `tar -C ${renderRemoteShellPath(dir)} ${flags} - -- ${shSingleQuote(base)}`;
 }
 
-/** 远端从 stdin 解包到指定目录。 */
-export function buildRemoteTarExtractCommand(
-  remoteDir: string,
-  opts: { gzip?: boolean } = {},
-): string {
-  return `tar -C ${renderRemoteShellPath(remoteDir)} ${tarFlags(false, opts.gzip === true)} -`;
+const IS_WIN = process.platform === 'win32';
+
+export interface LocalTarBinary {
+  path: string;
+  /** 需要前置到 argv 的额外参数（GNU tar 用 --force-local）。 */
+  argsPrefix: readonly string[];
+  /** GNU tar（MSYS）：路径必须使用正斜杠。 */
+  gnu: boolean;
+}
+
+/**
+ * Windows 上查找 Git 自带的 GNU tar。System32 的 bsdtar 会按 ANSI 代码页
+ * 解释归档中的 UTF-8 文件名（中文乱码），因此优先使用 GNU tar。
+ * PATH 里常见的是 <Git>/usr/bin、<Git>/cmd 或 <Git>/mingw64/bin。
+ */
+async function findGitGnuTar(): Promise<string | undefined> {
+  const dirs = (process.env.PATH ?? '').split(path.delimiter).filter((dir) => dir.length > 0);
+  const candidates: string[] = [];
+  for (const dir of dirs) {
+    if (/[\\/]Git[\\/]usr[\\/]bin[\\/]?$/i.test(dir)) {
+      candidates.push(path.join(dir, 'tar.exe'));
+    } else if (/[\\/]Git[\\/]cmd[\\/]?$/i.test(dir)) {
+      candidates.push(path.join(dir, '..', 'usr', 'bin', 'tar.exe'));
+    } else if (/[\\/]Git[\\/]mingw64[\\/]bin[\\/]?$/i.test(dir)) {
+      candidates.push(path.join(dir, '..', '..', 'usr', 'bin', 'tar.exe'));
+    }
+  }
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return path.resolve(candidate);
+    } catch {
+      // 继续尝试下一个候选。
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 解析本地 tar：Windows 优先 Git GNU tar（--force-local + 正斜杠路径），
+ * 找不到时回退系统 tar；POSIX 直接使用系统 tar。
+ */
+export async function resolveLocalTarBinary(): Promise<LocalTarBinary> {
+  if (IS_WIN) {
+    const gnu = await findGitGnuTar();
+    if (gnu !== undefined) {
+      return { path: gnu, argsPrefix: ['--force-local'], gnu: true };
+    }
+  }
+  return { path: await resolveToolBinary('tar'), argsPrefix: [], gnu: false };
+}
+
+/** GNU tar 需要正斜杠路径；系统 tar 保持原样。 */
+export function localTarPath(binary: LocalTarBinary, value: string): string {
+  return binary.gnu ? value.replace(/\\/g, '/') : value;
 }
 
 export interface RunLocalTarInput {
@@ -55,16 +105,19 @@ export interface RunLocalTarInput {
   stdinFile?: string;
   stdoutFile?: string;
   label?: string;
-  /** 测试可注入；默认解析系统 tar。 */
-  binary?: string;
+  /** 测试可注入路径；默认按平台解析（见 resolveLocalTarBinary）。 */
+  binary?: string | LocalTarBinary;
 }
 
 /** 运行本地 tar（stdinFile/stdoutFile 用于流式管道）。 */
 export async function runLocalTar(input: RunLocalTarInput): Promise<RunResult> {
-  const file = input.binary ?? (await resolveToolBinary('tar'));
+  const binary =
+    typeof input.binary === 'string'
+      ? { path: input.binary, argsPrefix: [], gnu: false }
+      : (input.binary ?? (await resolveLocalTarBinary()));
   return spawnCapture({
-    file,
-    argv: input.argv,
+    file: binary.path,
+    argv: [...binary.argsPrefix, ...input.argv],
     env: buildChildEnv(),
     timeoutMs: input.timeoutMs ?? 300_000,
     maxOutputBytes: input.maxOutputBytes ?? 1_048_576,
@@ -83,36 +136,26 @@ export interface CreateLocalArchiveInput {
   binary?: string;
 }
 
-/** 本地创建 tar 归档（stdout 流式写入 archive，不经过内存）。 */
+/**
+ * 本地创建 tar 归档（stdout 流式写入 archive，不经过内存）。
+ *
+ * 归档创建固定使用系统 tar（Windows 上是 System32 bsdtar）：它把文件模式记为
+ * 0666，与 Node 在 Windows 上报告的本地清单 mode 一致；Git 的 GNU tar 会记为
+ * 0644，远端 `tar -xpf` 解包后与上传清单不符（verify_manifest_mismatch）。
+ * 下载方向的本地解包仍优先 GNU tar（见 resolveLocalTarBinary）。
+ */
 export async function createLocalArchive(input: CreateLocalArchiveInput): Promise<RunResult> {
+  const binary = input.binary ?? (await resolveToolBinary('tar'));
   const source = path.resolve(input.source);
   const contents = input.contents === true;
   const dir = contents ? source : path.dirname(source);
   const base = contents ? '.' : path.basename(source);
   return runLocalTar({
     argv: ['-C', dir, tarFlags(true, input.gzip === true), '-', '--', base],
+    binary,
     stdoutFile: path.resolve(input.archive),
     ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
-    ...(input.binary !== undefined ? { binary: input.binary } : {}),
     label: 'local tar create',
-  });
-}
-
-export interface ExtractLocalArchiveInput {
-  archive: string;
-  destDir: string;
-  gzip?: boolean;
-  timeoutMs?: number;
-  binary?: string;
-}
-
-/** 本地解包归档到 destDir。 */
-export async function extractLocalArchive(input: ExtractLocalArchiveInput): Promise<RunResult> {
-  return runLocalTar({
-    argv: ['-C', path.resolve(input.destDir), tarFlags(false, input.gzip === true), path.resolve(input.archive)],
-    ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
-    ...(input.binary !== undefined ? { binary: input.binary } : {}),
-    label: 'local tar extract',
   });
 }
 

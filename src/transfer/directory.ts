@@ -34,6 +34,8 @@ import {
 import { probeRemoteManifest, probeRemotePath, resolveRemoteHome } from './probe.js';
 import {
   createLocalArchive,
+  localTarPath,
+  resolveLocalTarBinary,
   runLocalTar,
   runRemoteTar,
   tarFailure,
@@ -142,37 +144,6 @@ function diffPortable(
     return match === undefined ? entry : { ...entry, mode: match.mode };
   });
   return diffManifests(adjusted, actual);
-}
-
-/**
- * 本地解包 tar。Windows 的 System32 bsdtar 会按 ANSI 代码页解释归档里的
- * UTF-8 文件名（中文变成乱码），因此优先使用 PATH 中 Git 的 GNU tar；
- * 找不到时退回系统 tar。POSIX 直接使用系统 tar。
- */
-async function resolveLocalExtractTar(): Promise<string | undefined> {
-  if (process.platform !== 'win32') return undefined;
-  const dirs = (process.env.PATH ?? '').split(path.delimiter).filter((dir) => dir.length > 0);
-  const candidates: string[] = [];
-  for (const dir of dirs) {
-    // Git Bash 环境通常直接提供 <Git>/usr/bin；PowerShell/npx 往往只有
-    // <Git>/cmd，需要从安装根目录反推 GNU tar。
-    if (/[\\/]Git[\\/]usr[\\/]bin[\\/]?$/i.test(dir)) {
-      candidates.push(path.join(dir, 'tar.exe'));
-    } else if (/[\\/]Git[\\/]cmd[\\/]?$/i.test(dir)) {
-      candidates.push(path.join(dir, '..', 'usr', 'bin', 'tar.exe'));
-    } else if (/[\\/]Git[\\/]mingw64[\\/]bin[\\/]?$/i.test(dir)) {
-      candidates.push(path.join(dir, '..', '..', 'usr', 'bin', 'tar.exe'));
-    }
-  }
-  for (const candidate of candidates) {
-    try {
-      await fs.access(candidate);
-      return path.resolve(candidate);
-    } catch {
-      // 继续尝试下一个候选。
-    }
-  }
-  return undefined;
 }
 
 /**
@@ -339,7 +310,7 @@ export async function uploadTree(input: UploadTreeInput): Promise<TransferFacts>
   } finally {
     const report = await cleanup.run();
     if (report.failures.length > 0) {
-      deps.ctx.log.warn(
+      deps.log.warn(
         { failures: report.failures, tool: 'uploadTree' },
         'transfer cleanup incomplete',
       );
@@ -487,18 +458,19 @@ export async function downloadTree(input: DownloadTreeInput): Promise<TransferFa
     const staging = newLocalTempPath(dir, 'download-staging');
     const stagingHandle = cleanup.addLocal(staging);
     await fs.mkdir(staging, { mode: 0o700 });
-    const extractBinary = await resolveLocalExtractTar();
-    // Windows 的 GNU tar（MSYS）需要正斜杠路径与 --force-local，否则 "C:\..."
-    // 会被当作 host:path 或无法打开。
-    const tarPath = (p: string): string =>
-      extractBinary !== undefined ? p.replace(/\\/g, '/') : p;
+    // Windows 优先 GNU tar；argsPrefix（--force-local）由 runLocalTar 统一追加，
+    // GNU tar 需要的正斜杠路径由 localTarPath 处理。
+    const tarBinary = await resolveLocalTarBinary();
     // -p 保留归档中的权限位，使本地 manifest 与远端源清单可按 mode 严格比较。
-    const extractArgv = ['-C', tarPath(path.resolve(staging))];
-    if (extractBinary !== undefined) extractArgv.push('--force-local');
-    extractArgv.push('-xpf', tarPath(path.resolve(archive)));
+    const extractArgv = [
+      '-C',
+      localTarPath(tarBinary, path.resolve(staging)),
+      '-xpf',
+      localTarPath(tarBinary, path.resolve(archive)),
+    ];
     const extractRun = await runLocalTar({
       argv: extractArgv,
-      ...(extractBinary !== undefined ? { binary: extractBinary } : {}),
+      binary: tarBinary,
       timeoutMs: input.timeoutMs ?? 300_000,
       label: 'local tar extract',
     });
@@ -573,7 +545,7 @@ export async function downloadTree(input: DownloadTreeInput): Promise<TransferFa
   } finally {
     const report = await cleanup.run();
     if (report.failures.length > 0) {
-      deps.ctx.log.warn(
+      deps.log.warn(
         { failures: report.failures, tool: 'downloadTree' },
         'transfer cleanup incomplete',
       );

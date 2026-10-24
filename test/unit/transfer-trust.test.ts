@@ -61,7 +61,6 @@ function makeConfig(): RemoteConfig {
     maxTotalBytes: 10 * 1024 * 1024,
     maxDepth: 10,
     transferTimeoutMs: 30_000,
-    verify: 'manifest' as const,
   };
   return {
     version: 1,

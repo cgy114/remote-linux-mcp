@@ -27,7 +27,6 @@ const FILES: FilesConfig = {
   maxTotalBytes: 4 * 1024 * 1024 * 1024,
   maxDepth: 64,
   transferTimeoutMs: 300_000,
-  verify: 'manifest',
 };
 
 function makeLogger(): Logger {

@@ -396,7 +396,7 @@ export async function writeRemoteFile(input: WriteRemoteFileInput): Promise<Writ
   } finally {
     const report = await cleanup.run();
     if (report.failures.length > 0) {
-      deps.ctx.log.warn(
+      deps.log.warn(
         { failures: report.failures, tool: 'writeRemoteFile' },
         'transfer cleanup incomplete',
       );

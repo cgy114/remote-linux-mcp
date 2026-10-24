@@ -95,7 +95,6 @@ export const filesSchema = z
     max_total_bytes: positiveIntSchema.optional(),
     max_depth: z.number().int().min(0).optional(),
     transfer_timeout_ms: positiveIntSchema.optional(),
-    verify: z.literal('manifest').optional(),
   })
   .superRefine((files, ctx) => {
     const maxFile = files.max_file_bytes ?? DEFAULT_MAX_FILE_BYTES;
@@ -147,7 +146,8 @@ export interface DefaultsForOptions {
 
 /**
  * 展开 files 段的默认值：512 MiB 单文件 / 10000 个文件 / 4 GiB 总量 /
- * 深度 64 / 传输超时 300s / manifest 校验。local_roots 可注入路径解析器。
+ * 深度 64 / 传输超时 300s。校验策略是 P3 不变量（manifest），不可配置。
+ * local_roots 可注入路径解析器。
  */
 export function filesFor(
   raw: RawConfig,
@@ -164,7 +164,6 @@ export function filesFor(
     maxTotalBytes: f?.max_total_bytes ?? DEFAULT_MAX_TOTAL_BYTES,
     maxDepth: f?.max_depth ?? DEFAULT_MAX_DEPTH,
     transferTimeoutMs: f?.transfer_timeout_ms ?? DEFAULT_TRANSFER_TIMEOUT_MS,
-    verify: f?.verify ?? 'manifest',
   };
 }
 

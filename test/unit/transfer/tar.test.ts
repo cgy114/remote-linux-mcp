@@ -5,11 +5,30 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { RunResult } from '../../../src/types.js';
 import {
   buildRemoteTarCreateCommand,
-  buildRemoteTarExtractCommand,
   createLocalArchive,
-  extractLocalArchive,
+  localTarPath,
+  resolveLocalTarBinary,
+  runLocalTar,
   tarFailure,
 } from '../../../src/transfer/tar.js';
+
+/** 测试用本地解包：与 directory.ts 相同，走共用的 tar 解析器。 */
+async function extract(
+  archive: string,
+  destDir: string,
+  opts: { gzip?: boolean } = {},
+): Promise<RunResult> {
+  const binary = await resolveLocalTarBinary();
+  return runLocalTar({
+    argv: [
+      '-C',
+      localTarPath(binary, path.resolve(destDir)),
+      opts.gzip === true ? '-xzf' : '-xf',
+      localTarPath(binary, path.resolve(archive)),
+    ],
+    binary,
+  });
+}
 
 function run(overrides: Partial<RunResult> = {}): RunResult {
   return {
@@ -55,10 +74,6 @@ describe('tar', () => {
       expect(buildRemoteTarCreateCommand('/home/u/dir', { gzip: true })).toBe(
         "tar -C '/home/u' -czf - -- 'dir'",
       );
-      expect(buildRemoteTarExtractCommand('/home/u')).toBe("tar -C '/home/u' -xf -");
-      expect(buildRemoteTarExtractCommand('~', { gzip: true })).toBe(
-        "tar -C \"$HOME\" -xzf -",
-      );
     });
 
     it('refuses to archive a root', () => {
@@ -82,7 +97,7 @@ describe('tar', () => {
       const created = await createLocalArchive({ source: file, archive });
       expect(tarFailure(created)).toBeUndefined();
 
-      const extracted = await extractLocalArchive({ archive, destDir: dest });
+      const extracted = await extract(archive, dest);
       expect(tarFailure(extracted)).toBeUndefined();
       await expect(fs.readFile(path.join(dest, 'file.txt'), 'utf8')).resolves.toBe('hello tar');
     });
@@ -97,7 +112,7 @@ describe('tar', () => {
       await fs.mkdir(dest);
 
       await createLocalArchive({ source: src, archive, contents: true });
-      await extractLocalArchive({ archive, destDir: dest });
+      await extract(archive, dest);
       await expect(fs.readFile(path.join(dest, 'a.txt'), 'utf8')).resolves.toBe('a');
       await expect(fs.readFile(path.join(dest, 'nested', 'b.txt'), 'utf8')).resolves.toBe('b');
     });
@@ -111,7 +126,7 @@ describe('tar', () => {
       await fs.mkdir(dest);
 
       await createLocalArchive({ source: src, archive });
-      await extractLocalArchive({ archive, destDir: dest });
+      await extract(archive, dest);
       await expect(fs.readFile(path.join(dest, 'src', 'a.txt'), 'utf8')).resolves.toBe('a');
     });
 
@@ -123,8 +138,27 @@ describe('tar', () => {
       await fs.mkdir(dest);
 
       await createLocalArchive({ source: file, archive, gzip: true });
-      await extractLocalArchive({ archive, destDir: dest, gzip: true });
+      await extract(archive, dest, { gzip: true });
       await expect(fs.readFile(path.join(dest, 'g.txt'), 'utf8')).resolves.toBe('gzip');
+    });
+  });
+
+  describe('resolveLocalTarBinary', () => {
+    it('normalizes paths only for GNU tar', () => {
+      const gnu = { path: 'tar', argsPrefix: ['--force-local'], gnu: true };
+      const system = { path: 'tar', argsPrefix: [], gnu: false };
+      expect(localTarPath(gnu, 'C:\\a\\b.tar')).toBe('C:/a/b.tar');
+      expect(localTarPath(system, 'C:\\a\\b.tar')).toBe('C:\\a\\b.tar');
+    });
+
+    it('returns an absolute binary and uses --force-local for GNU tar', async () => {
+      const binary = await resolveLocalTarBinary();
+      expect(path.isAbsolute(binary.path)).toBe(true);
+      if (binary.gnu) {
+        expect(binary.argsPrefix).toEqual(['--force-local']);
+      } else {
+        expect(binary.argsPrefix).toEqual([]);
+      }
     });
   });
 

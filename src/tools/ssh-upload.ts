@@ -1,6 +1,5 @@
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { UsageError } from '../errors/classes.js';
 import { runSshOperation } from '../pipeline/operation.js';
 import type { ResolvedTarget } from '../pipeline/target.js';
 import {
@@ -50,13 +49,6 @@ export interface UploadPlan {
   timeoutMs: number;
 }
 
-function remapLocalDenied(err: unknown): Error {
-  if (err instanceof UsageError && err.code === 'local_path_denied') {
-    return new UsageError(err.message, { code: 'local_root_not_allowed' });
-  }
-  return err instanceof Error ? err : new Error(String(err));
-}
-
 /**
  * 构建上传计划（纯本地）：files 开关 -> 本地源解析（local_roots）-> 远端路径
  * 规范化与写 deny -> 目录清单。任何违规抛 UsageError，由管线转为 Policy。
@@ -69,17 +61,12 @@ export async function buildUploadPlan(
   assertTransferEnabled(files);
 
   const limits = fileLimitsFrom(files);
-  let local: LocalSource;
-  try {
-    local = await resolveLocalSource({
-      path: input.local_path,
-      roots: files.localRoots,
-      limits,
-      allowDir: input.recursive === true,
-    });
-  } catch (err) {
-    throw remapLocalDenied(err);
-  }
+  const local: LocalSource = await resolveLocalSource({
+    path: input.local_path,
+    roots: files.localRoots,
+    limits,
+    allowDir: input.recursive === true,
+  });
 
   const normalized = normalizeRemotePath(input.remote_path, target.host.cwd);
   const denyWrite = buildRemoteDenyLists(files).write;

@@ -38,15 +38,19 @@ vi.mock('../../../src/transfer/deps.js', async (importOriginal) => {
   };
 });
 
-const { createRemoteDirectory, newRemoteTempPath, removeRemoteTree, swapRemoteIntoPlace } =
-  await import('../../../src/transfer/stage.js');
+const { newRemoteTempPath, removeRemoteTree, swapRemoteIntoPlace } = await import(
+  '../../../src/transfer/stage.js'
+);
 
 const deps = {
   target: { host: { alias: 'web1' } },
-  ctx: {},
+  knownHostsFile: '/tmp/known_hosts',
+  log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() },
   limits: { maxFileBytes: 10, maxFiles: 10, maxTotalBytes: 100, maxDepth: 5 },
   deadlineMs: Date.now() + 10000,
 } as unknown as TransferDeps;
+
+const TEMP = '/home/u/.remote-mcp-tmp-0123456789abcdef';
 
 describe('stage', () => {
   it('creates same-directory temp paths', () => {
@@ -55,26 +59,28 @@ describe('stage', () => {
     expect(newRemoteTempPath('~/target')).toMatch(/^~\/\.remote-mcp-tmp-[0-9a-f]{16}$/);
   });
 
-  it('creates directories and reports failures as facts', async () => {
-    state.commands.length = 0;
-    state.results = [state.make(0)];
-    const ok = await createRemoteDirectory(deps, '/home/u/a b');
-    expect(ok.ok).toBe(true);
-    expect(state.commands[0]).toBe("mkdir -p -- '/home/u/a b'");
-
-    state.results = [state.make(1, 'mkdir: cannot create')];
-    const failed = await createRemoteDirectory(deps, '/home/u/x');
-    expect(failed.ok).toBe(false);
-    expect(failed.error).toMatchObject({ kind: 'RemoteExit', code: 'remote_exit' });
-  });
-
   it('refuses to remove root or home', async () => {
     await expect(removeRemoteTree(deps, '/')).rejects.toMatchObject({ code: 'remote_path_invalid' });
     await expect(removeRemoteTree(deps, '~')).rejects.toMatchObject({ code: 'remote_path_invalid' });
+  });
+
+  it('refuses to remove paths without the transfer temp prefix', async () => {
+    state.commands.length = 0;
+    for (const path of ['/home/u/user-file', '/home/u/.remote-mcp-tmp-nothex', '/home/u/.remote-mcp-x-abc']) {
+      await expect(removeRemoteTree(deps, path)).rejects.toMatchObject({
+        code: 'remote_cleanup_refused',
+      });
+    }
+    expect(state.commands).toHaveLength(0);
+    expect(deps.log.warn).toHaveBeenCalled();
+  });
+
+  it('removes transfer temp paths', async () => {
+    state.commands.length = 0;
     state.results = [state.make(0)];
-    const ok = await removeRemoteTree(deps, '/home/u/tmp');
+    const ok = await removeRemoteTree(deps, TEMP);
     expect(ok.ok).toBe(true);
-    expect(state.commands.at(-1)).toBe("rm -rf -- '/home/u/tmp'");
+    expect(state.commands.at(-1)).toBe(`rm -rf -- '${TEMP}'`);
   });
 
   describe('swapRemoteIntoPlace', () => {

@@ -4,12 +4,8 @@ import {
   buildSftpBatch,
   chmodStep,
   getStep,
-  mkdirStep,
   putStep,
   quoteSftpPath,
-  removeStep,
-  renameStep,
-  rmdirStep,
   sftpDiagnostics,
 } from '../../../src/transfer/sftp.js';
 
@@ -65,11 +61,7 @@ describe('sftp', () => {
       expect(getStep('/home/u/a b.txt', local)).toBe(`get "/home/u/a b.txt" ${expectedLocal}`);
     });
 
-    it('builds rename/remove/mkdir/rmdir/chmod', () => {
-      expect(renameStep('/a', '/b')).toBe('rename "/a" "/b"');
-      expect(removeStep('/a')).toBe('rm "/a"');
-      expect(rmdirStep('/a')).toBe('rmdir "/a"');
-      expect(mkdirStep('/a b')).toBe('mkdir "/a b"');
+    it('builds chmod', () => {
       expect(chmodStep(0o755, '/a')).toBe('chmod 755 "/a"');
       expect(chmodStep('640', '/a')).toBe('chmod 640 "/a"');
       expect(chmodStep(0o100644, '/a')).toBe('chmod 644 "/a"');

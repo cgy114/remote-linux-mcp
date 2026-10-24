@@ -3,7 +3,6 @@ import {
   diffManifests,
   digestManifest,
   normalizeManifestEntry,
-  parseManifest,
   renderManifestLine,
   sortManifestEntries,
   type ManifestEntry,
@@ -55,8 +54,8 @@ describe('manifest', () => {
     });
   });
 
-  describe('render/parse', () => {
-    it('roundtrips entries with tabs, unicode and newline link targets', () => {
+  describe('render', () => {
+    it('renders v1 lines with base64 fields', () => {
       const weird: ManifestEntry = {
         path: 'a\tb/ü.txt',
         type: 'symlink',
@@ -67,32 +66,7 @@ describe('manifest', () => {
       const text = renderManifestLine(weird);
       expect(text.startsWith('v1\t')).toBe(true);
       expect(text).not.toContain('a\tb');
-      expect(parseManifest(text)).toEqual([weird]);
-    });
-
-    it('roundtrips many entries deterministically', () => {
-      const entries = [C, A, LINK, B];
-      const text = entries.map((entry) => renderManifestLine(entry)).join('\n') + '\n';
-      expect(parseManifest(text)).toEqual(sortManifestEntries(entries));
-    });
-
-    it('rejects malformed manifest text', () => {
-      const valid = renderManifestLine(A);
-      const cases = [
-        '',
-        'v2\tx',
-        valid.replace(/^v1/, 'v2'),
-        `${valid}\t\x00extra`,
-        valid.replace('v1', 'v1\t'),
-        'v1\tnot-base64\ta\tMQ==\tNjQ0\t\t',
-      ];
-      // 空文本是合法的空清单
-      expect(parseManifest(cases[0]!)).toEqual([]);
-      for (const text of cases.slice(1)) {
-        expect(() => parseManifest(text)).toThrow(
-          expect.objectContaining({ code: 'remote_manifest_failed' }),
-        );
-      }
+      expect(text.split('\t')).toHaveLength(7);
     });
   });
 

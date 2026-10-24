@@ -30,7 +30,6 @@ export interface ManifestDiff {
 
 const MANIFEST_VERSION = 'v1';
 const SHA256_RE = /^[0-9a-f]{64}$/;
-const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
 function manifestError(message: string): UsageError {
   return new UsageError(message, { code: 'remote_manifest_failed' });
@@ -96,17 +95,6 @@ function encodeField(value: string): string {
   return Buffer.from(value, 'utf8').toString('base64');
 }
 
-function decodeField(value: string, field: string): string {
-  if (!BASE64_RE.test(value) || value.length % 4 !== 0) {
-    throw manifestError(`manifest field ${field} is not valid base64`);
-  }
-  const buf = Buffer.from(value, 'base64');
-  if (buf.toString('base64') !== value) {
-    throw manifestError(`manifest field ${field} is not valid base64`);
-  }
-  return buf.toString('utf8');
-}
-
 /** 单行清单：v1 + 6 个 base64 字段（path/type/size/mode/sha256/linkTarget）。 */
 export function renderManifestLine(entry: ManifestEntry): string {
   const e = normalizeManifestEntry(entry);
@@ -119,39 +107,6 @@ export function renderManifestLine(entry: ManifestEntry): string {
     encodeField(e.sha256 ?? ''),
     encodeField(e.linkTarget ?? ''),
   ].join('\t');
-}
-
-/** 解析清单文本；任何格式错误抛 remote_manifest_failed。返回按 path 排序的条目。 */
-export function parseManifest(text: string): ManifestEntry[] {
-  if (typeof text !== 'string') throw manifestError('manifest must be text');
-  const entries: ManifestEntry[] = [];
-  const lines = text.split(/\r?\n/);
-  for (const line of lines) {
-    if (line.trim() === '') continue;
-    const fields = line.split('\t');
-    if (fields.length !== 7 || fields[0] !== MANIFEST_VERSION) {
-      throw manifestError('manifest line has an unexpected format');
-    }
-    const path = decodeField(fields[1]!, 'path');
-    const type = decodeField(fields[2]!, 'type') as ManifestEntryType;
-    const sizeText = decodeField(fields[3]!, 'size');
-    const modeText = decodeField(fields[4]!, 'mode');
-    const sha = decodeField(fields[5]!, 'sha256');
-    const linkTarget = decodeField(fields[6]!, 'linkTarget');
-    if (!/^\d+$/.test(sizeText) || !/^\d+$/.test(modeText)) {
-      throw manifestError('manifest size/mode must be decimal integers');
-    }
-    const entry: ManifestEntry = {
-      path,
-      type,
-      size: Number(sizeText),
-      mode: Number(modeText),
-    };
-    if (sha !== '') entry.sha256 = sha;
-    if (linkTarget !== '') entry.linkTarget = linkTarget;
-    entries.push(normalizeManifestEntry(entry));
-  }
-  return sortManifestEntries(entries);
 }
 
 /** 清单摘要：排序后逐行渲染（含末尾换行）再 sha256。 */

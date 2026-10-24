@@ -31,7 +31,8 @@ export const READ_FILE_ANNOTATIONS: ToolAnnotations = {
 export function makeTransferDeps(target: ResolvedTarget, ctx: ToolContext): TransferDeps {
   return {
     target,
-    ctx,
+    knownHostsFile: ctx.paths.knownHostsFile,
+    log: ctx.log,
     limits: fileLimitsFrom(target.config.files),
     deadlineMs: Date.now() + target.config.files.transferTimeoutMs,
   };

@@ -12,7 +12,6 @@ import {
   type FileLimits,
 } from '../../../src/transfer/file-policy.js';
 import {
-  assertLocalContained,
   buildLocalManifest,
   expandLocalPath,
   isLocalContained,
@@ -49,7 +48,6 @@ describe('file-policy', () => {
         maxTotalBytes: 3,
         maxDepth: 4,
         transferTimeoutMs: 5,
-        verify: 'manifest',
       }),
     ).toEqual({ maxFileBytes: 1, maxFiles: 2, maxTotalBytes: 3, maxDepth: 4 });
   });
@@ -100,9 +98,6 @@ describe('local-path', () => {
       expect(isLocalContained(root, path.join(root, 'a', 'b'))).toBe(true);
       expect(isLocalContained(root, outside)).toBe(false);
       expect(isLocalContained(root, path.join(root, '..', 'outside'))).toBe(false);
-      expect(() => assertLocalContained(root, outside)).toThrow(
-        expect.objectContaining({ code: 'local_path_denied' }),
-      );
     });
 
     it('folds case on Windows only', () => {
@@ -186,7 +181,7 @@ describe('local-path', () => {
           limits: LIMITS,
           roots: [root],
         }),
-      ).rejects.toMatchObject({ code: 'local_path_denied' });
+      ).rejects.toMatchObject({ code: 'local_root_not_allowed' });
     });
 
     it('rejects paths outside the roots', async () => {
@@ -194,7 +189,7 @@ describe('local-path', () => {
       await fs.writeFile(file, 'x');
       await expect(
         resolveLocalSource({ path: file, limits: LIMITS, roots: [root] }),
-      ).rejects.toMatchObject({ code: 'local_path_denied' });
+      ).rejects.toMatchObject({ code: 'local_root_not_allowed' });
     });
   });
 
@@ -219,7 +214,7 @@ describe('local-path', () => {
       ).rejects.toMatchObject({ code: 'local_parent_missing' });
       await expect(
         resolveLocalTarget({ path: path.join(outside, 'x.txt'), limits: LIMITS, roots: [root] }),
-      ).rejects.toMatchObject({ code: 'local_path_denied' });
+      ).rejects.toMatchObject({ code: 'local_root_not_allowed' });
     });
 
     it('enforces overwrite and type rules', async () => {

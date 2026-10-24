@@ -332,7 +332,7 @@ export async function uploadSingleFile(input: UploadSingleFileInput): Promise<Tr
   } finally {
     const report = await cleanup.run();
     if (report.failures.length > 0) {
-      deps.ctx.log.warn(
+      deps.log.warn(
         { failures: report.failures, tool: 'uploadSingleFile' },
         'transfer cleanup incomplete',
       );
@@ -583,7 +583,7 @@ export async function downloadSingleFile(
   } finally {
     const report = await cleanup.run();
     if (report.failures.length > 0) {
-      deps.ctx.log.warn(
+      deps.log.warn(
         { failures: report.failures, tool: 'downloadSingleFile' },
         'transfer cleanup incomplete',
       );

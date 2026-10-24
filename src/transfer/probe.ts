@@ -288,7 +288,9 @@ export async function probeRemoteManifest(
   return { ok: true, entries: sortManifestEntries(entries) };
 }
 
-const homeCache = new WeakMap<TransferDeps, Promise<string>>();
+const HOME_CACHE_TTL_MS = 5 * 60_000;
+/** destination（user@host:port）-> home；跨工具调用复用，5 分钟后过期重查。 */
+const homeCache = new Map<string, { home: string; at: number }>();
 
 /**
  * 携带已分类 ToolError 的异常。传输层失败必须保留 classifyTransportRun 的
@@ -309,27 +311,30 @@ function invalidHome(): Error {
 }
 
 /**
- * 解析远端 home（`printf %s "$HOME"`），按 TransferDeps 缓存。
- * 结果必须是绝对路径；传输失败抛携带原分类的异常，空/非法输出归为
- * Internal remote_home_resolution_failed。
+ * 解析远端 home（`printf %s "$HOME"`），按 destination 缓存（TTL 5 分钟），
+ * 因此不同工具调用的 deps 实例也能复用。结果必须是绝对路径；传输失败抛
+ * 携带原分类的异常，空/非法输出归为 Internal remote_home_resolution_failed。
  */
-export function resolveRemoteHome(deps: TransferDeps): Promise<string> {
-  if (deps.home !== undefined) return Promise.resolve(deps.home);
-  const cached = homeCache.get(deps);
-  if (cached !== undefined) return cached;
-  const pending = (async (): Promise<string> => {
-    const run = await runRemoteCommand(deps, "printf '%s' \"$HOME\"", {
-      label: `home:${deps.target.host.alias}`,
-    });
-    const failure = classifyTransportRun(run, { label: 'home' });
-    if (failure !== undefined) throw homeError(failure);
-    const value = run.stdout.replace(/\r?\n$/, '');
-    if (value.length === 0 || value[0] !== '/' || /[\r\n\u0000]/.test(value)) {
-      throw invalidHome();
-    }
-    return value;
-  })();
-  homeCache.set(deps, pending);
-  pending.catch(() => homeCache.delete(deps));
-  return pending;
+export async function resolveRemoteHome(deps: TransferDeps): Promise<string> {
+  if (deps.home !== undefined) return deps.home;
+  const key = deps.target.destination;
+  const cached = homeCache.get(key);
+  if (cached !== undefined && Date.now() - cached.at < HOME_CACHE_TTL_MS) {
+    return cached.home;
+  }
+  const run = await runRemoteCommand(deps, "printf '%s' \"$HOME\"", {
+    label: `home:${deps.target.host.alias}`,
+  });
+  const failure = classifyTransportRun(run, { label: 'home' });
+  if (failure !== undefined) {
+    homeCache.delete(key);
+    throw homeError(failure);
+  }
+  const value = run.stdout.replace(/\r?\n$/, '');
+  if (value.length === 0 || value[0] !== '/' || /[\r\n\u0000]/.test(value)) {
+    homeCache.delete(key);
+    throw invalidHome();
+  }
+  homeCache.set(key, { home: value, at: Date.now() });
+  return value;
 }

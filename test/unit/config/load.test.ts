@@ -119,7 +119,6 @@ hosts:
         maxTotalBytes: 4294967296,
         maxDepth: 64,
         transferTimeoutMs: 300000,
-        verify: 'manifest',
       },
     });
   });

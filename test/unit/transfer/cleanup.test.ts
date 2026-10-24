@@ -24,7 +24,7 @@ describe('cleanup tracker', () => {
 
     const tracker = createCleanupTracker();
     tracker.addLocal(file);
-    tracker.addRemote('/remote/tmp');
+    tracker.addRemote('/remote/.remote-mcp-tmp-0123456789abcdef');
     tracker.release(tracker.pending()[1]!);
 
     const report = await tracker.run();
@@ -88,11 +88,21 @@ describe('cleanup tracker', () => {
     expect(second).toBe(first);
   });
 
+  it('refuses to register remote paths without the transfer temp prefix', () => {
+    const tracker = createCleanupTracker();
+    for (const path of ['/remote/user-file', '/remote/.remote-mcp-tmp-nothex', '/remote/.backup']) {
+      expect(() => tracker.addRemote(path)).toThrow(
+        expect.objectContaining({ code: 'remote_cleanup_refused' }),
+      );
+    }
+    expect(tracker.pending()).toEqual([]);
+  });
+
   it('fails remote cleanup when no deps or remover is provided', async () => {
     const tracker = createCleanupTracker();
-    tracker.addRemote('/remote/tmp');
+    tracker.addRemote('/remote/.remote-mcp-tmp-0123456789abcdef');
     const report = await tracker.run();
-    expect(report.failures[0]).toMatchObject({ kind: 'remote', path: '/remote/tmp' });
+    expect(report.failures[0]).toMatchObject({ kind: 'remote', path: '/remote/.remote-mcp-tmp-0123456789abcdef' });
   });
 
   it('delegates remote removal to the injected function', async () => {
@@ -102,9 +112,9 @@ describe('cleanup tracker', () => {
         removed.push(p);
       },
     });
-    tracker.addRemote('/remote/tmp');
+    tracker.addRemote('/remote/.remote-mcp-tmp-0123456789abcdef');
     const report = await tracker.run();
     expect(report.removed).toBe(1);
-    expect(removed).toEqual(['/remote/tmp']);
+    expect(removed).toEqual(['/remote/.remote-mcp-tmp-0123456789abcdef']);
   });
 });

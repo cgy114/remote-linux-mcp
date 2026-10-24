@@ -1,6 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { UsageError } from '../errors/classes.js';
-import { dirnameRemote, normalizeRemotePath, renderRemoteShellPath } from '../policy/remote-path.js';
+import {
+  basenameRemote,
+  dirnameRemote,
+  normalizeRemotePath,
+  renderRemoteShellPath,
+} from '../policy/remote-path.js';
 import type { RunResult, ToolError } from '../types.js';
 import { runRemoteCommand, type TransferDeps } from './deps.js';
 import { classifyTransportRun } from './errors.js';
@@ -37,26 +42,39 @@ function guardRoot(p: string, action: string): string {
   return normalized;
 }
 
-/** 创建远端目录（mkdir -p）。 */
-export async function createRemoteDirectory(
-  deps: TransferDeps,
-  remotePath: string,
-): Promise<RemoteCommandOutcome> {
-  const pathValue = rooted(remotePath);
-  const run = await runRemoteCommand(
-    deps,
-    `mkdir -p -- ${renderRemoteShellPath(pathValue)}`,
-    { label: `mkdir:${deps.target.host.alias}` },
-  );
-  return outcome(run, 'mkdir');
+/** 传输层临时路径的 basename：`.remote-mcp-{tmp,stage,bak}-<hex>`。 */
+const REMOTE_TEMP_BASENAME_RE = /^\.remote-mcp-(tmp|stage|bak)-[0-9a-f]+$/;
+
+/** 是否为传输层生成的临时路径（只有这类路径允许被清理）。 */
+function isRemoteTempPath(remotePath: string): boolean {
+  return REMOTE_TEMP_BASENAME_RE.test(basenameRemote(remotePath));
 }
 
-/** 递归删除远端目录/文件（rm -rf）；拒绝根目录与 home。 */
+/** 清理前的前缀断言；不匹配抛 remote_cleanup_refused。 */
+export function assertRemoteTempPath(remotePath: string): void {
+  if (!isRemoteTempPath(remotePath)) {
+    throw new UsageError('refusing to remove a path that is not a transfer temp path', {
+      code: 'remote_cleanup_refused',
+    });
+  }
+}
+
+/**
+ * 递归删除远端临时目录/文件（rm -rf）；拒绝根目录、home 与任何非
+ * `.remote-mcp-{tmp,stage,bak}-<hex>` 前缀的路径，防止误删用户文件。
+ */
 export async function removeRemoteTree(
   deps: TransferDeps,
   remotePath: string,
 ): Promise<RemoteCommandOutcome> {
   const pathValue = guardRoot(remotePath, 'remove');
+  if (!isRemoteTempPath(pathValue)) {
+    deps.log.warn(
+      { path: pathValue },
+      'refusing to remove a remote path that is not a transfer temp path',
+    );
+    assertRemoteTempPath(pathValue);
+  }
   const run = await runRemoteCommand(
     deps,
     `rm -rf -- ${renderRemoteShellPath(pathValue)}`,

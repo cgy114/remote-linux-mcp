@@ -26,7 +26,6 @@ const DEFAULT_FILES = {
   maxTotalBytes: 4294967296,
   maxDepth: 64,
   transferTimeoutMs: 300000,
-  verify: 'manifest',
 };
 
 describe('filesSchema', () => {
@@ -42,7 +41,6 @@ describe('filesSchema', () => {
             max_total_bytes: 2048,
             max_depth: 3,
             transfer_timeout_ms: 1000,
-            verify: 'manifest',
           },
         }),
       ),
@@ -51,6 +49,11 @@ describe('filesSchema', () => {
 
   it('rejects unknown fields inside files', () => {
     expect(ok(base({ files: { surprise: 1 } }))).toBe(false);
+  });
+
+  it('rejects the removed verify option (verification is a fixed policy)', () => {
+    expect(ok(base({ files: { verify: 'manifest' } }))).toBe(false);
+    expect(ok(base({ files: { verify: 'off' } }))).toBe(false);
   });
 
   it('rejects a non-positive transfer_timeout_ms and a negative max_depth', () => {
@@ -105,7 +108,6 @@ describe('filesFor / defaultsFor', () => {
       maxTotalBytes: 4096,
       maxDepth: 2,
       transferTimeoutMs: 5000,
-      verify: 'manifest',
     });
   });
 
@@ -145,7 +147,6 @@ files:
   max_total_bytes: 4194304
   max_depth: 8
   transfer_timeout_ms: 5000
-  verify: manifest
 hosts:
   a: { host: h, user: u }
 `,
@@ -159,7 +160,6 @@ hosts:
     expect(cfg.files.maxTotalBytes).toBe(4194304);
     expect(cfg.files.maxDepth).toBe(8);
     expect(cfg.files.transferTimeoutMs).toBe(5000);
-    expect(cfg.files.verify).toBe('manifest');
     expect(cfg.files.remoteDeny).toEqual(['/etc', '~/.gnupg']);
 
     const [sshRoot, relRoot] = cfg.files.localRoots;

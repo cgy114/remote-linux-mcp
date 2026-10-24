@@ -30,7 +30,12 @@ const state = vi.hoisted(() => {
     readMaxOutputBytes: 0,
     sftpRun: (() => mkRun(0)) as () => unknown,
     verifyRemote: (() => undefined) as () => unknown,
-    swap: (() => ({ ok: true, backup: '/home/u/.backup', run: mkRun(0), rolledBack: false })) as () => unknown,
+    swap: (() => ({
+      ok: true,
+      backup: '/home/u/.remote-mcp-tmp-0123456789abcdef',
+      run: mkRun(0),
+      rolledBack: false,
+    })) as () => unknown,
     putLocalMode: undefined as number | undefined,
   };
 });
@@ -95,7 +100,9 @@ vi.mock('../../../src/transfer/verify.js', () => ({
 }));
 
 vi.mock('../../../src/transfer/stage.js', () => ({
-  newRemoteTempPath: (target: string) => `${target}.tmp-test`,
+  assertRemoteTempPath: () => undefined,
+  newRemoteTempPath: (target: string) =>
+    `${target.slice(0, target.lastIndexOf('/'))}/.remote-mcp-tmp-0123456789abcdef`,
   swapRemoteIntoPlace: async () => {
     state.events.push('swap');
     return state.swap();
@@ -123,13 +130,8 @@ function makeDeps(): TransferDeps {
       },
       destination: 'deploy@10.0.0.5:22',
     },
-    ctx: {
-      paths: { configDir: 'C:\\cfg', knownHostsFile: 'C:\\cfg\\known_hosts' },
-      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() },
-      getConfig: async () => {
-        throw new Error('not used');
-      },
-    },
+    knownHostsFile: 'C:\\cfg\\known_hosts',
+    log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() },
     limits: { maxFileBytes: 1000, maxFiles: 100, maxTotalBytes: 10_000, maxDepth: 10 },
     deadlineMs: Date.now() + 60_000,
     home: '/home/u',

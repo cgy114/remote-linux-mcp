@@ -43,23 +43,6 @@ export function getStep(remote: string, local: string): string {
   return `get ${quoteSftpPath(remote)} ${localForBatch(local)}`;
 }
 
-export function renameStep(from: string, to: string): string {
-  return `rename ${quoteSftpPath(from)} ${quoteSftpPath(to)}`;
-}
-
-/** 删除文件（目录请用 rmdirStep / removeRemoteTree）。 */
-export function removeStep(remote: string): string {
-  return `rm ${quoteSftpPath(remote)}`;
-}
-
-export function rmdirStep(remote: string): string {
-  return `rmdir ${quoteSftpPath(remote)}`;
-}
-
-export function mkdirStep(remote: string): string {
-  return `mkdir ${quoteSftpPath(remote)}`;
-}
-
 function parseMode(mode: number | string): string {
   let value: number;
   if (typeof mode === 'number') {

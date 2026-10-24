@@ -90,7 +90,6 @@ export interface FilesConfig {
   maxTotalBytes: number;
   maxDepth: number;
   transferTimeoutMs: number;
-  verify: 'manifest';
 }
 
 export interface Defaults {

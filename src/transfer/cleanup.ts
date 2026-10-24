@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import type { TransferDeps } from './deps.js';
-import { removeRemoteTree } from './stage.js';
+import { assertRemoteTempPath, removeRemoteTree } from './stage.js';
 
 export type CleanupKind = 'local' | 'remote';
 
@@ -111,7 +111,11 @@ export function createCleanupTracker(input: CleanupTrackerInput = {}): CleanupTr
 
   const tracker: CleanupTracker = {
     addLocal: (path) => add('local', path),
-    addRemote: (path) => add('remote', path),
+    addRemote: (path) => {
+      // 登记期即校验前缀：只有传输层临时路径允许进入远端清理队列。
+      assertRemoteTempPath(path);
+      return add('remote', path);
+    },
     release(handle) {
       handle.released = true;
     },

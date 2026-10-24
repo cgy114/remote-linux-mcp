@@ -54,13 +54,8 @@ function makeDeps(overrides: Partial<TransferDeps> = {}): TransferDeps {
       },
       destination: 'deploy@10.0.0.5:22',
     },
-    ctx: {
-      paths: { knownHostsFile: 'C:\\cfg\\known_hosts' },
-      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() },
-      getConfig: async () => {
-        throw new Error('not used');
-      },
-    },
+    knownHostsFile: 'C:\\cfg\\known_hosts',
+    log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() },
     limits: { maxFileBytes: 10, maxFiles: 10, maxTotalBytes: 100, maxDepth: 5 },
     deadlineMs: Date.now() + 100_000,
     ...overrides,
@@ -81,6 +76,7 @@ describe('transfer deps', () => {
     expect(input['remoteCommand']).toBe('echo hi');
     expect(input['timeoutMs']).toBe(15000);
     expect(input['maxOutputBytes']).toBe(123456);
+    expect(input['knownHostsFile']).toBe('C:\\cfg\\known_hosts');
     expect(input['mode']).toBe('strict');
     expect(input['label']).toBe('transfer:web1');
   });

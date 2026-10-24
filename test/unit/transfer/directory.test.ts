@@ -59,7 +59,9 @@ vi.mock('../../../src/transfer/deps.js', async (importOriginal) => {
 });
 
 vi.mock('../../../src/transfer/stage.js', () => ({
-  newRemoteTempPath: (target: string) => `${target}.staging-test`,
+  assertRemoteTempPath: () => undefined,
+  newRemoteTempPath: (target: string) =>
+    `${target.slice(0, target.lastIndexOf('/'))}/.remote-mcp-tmp-0123456789abcdef`,
   swapRemoteIntoPlace: async () => {
     state.events.push('swap');
     return state.swap();
@@ -119,13 +121,8 @@ function makeDeps(): TransferDeps {
       },
       destination: 'deploy@10.0.0.5:22',
     },
-    ctx: {
-      paths: { configDir: 'C:\\cfg', knownHostsFile: 'C:\\cfg\\known_hosts' },
-      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() },
-      getConfig: async () => {
-        throw new Error('not used');
-      },
-    },
+    knownHostsFile: 'C:\\cfg\\known_hosts',
+    log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() },
     limits: { maxFileBytes: 1_000_000, maxFiles: 100, maxTotalBytes: 10_000_000, maxDepth: 10 },
     deadlineMs: Date.now() + 60_000,
     home: '/home/u',
@@ -164,7 +161,7 @@ function reset(): void {
   state.probeManifest = () => ({ ok: true, entries: [] });
   state.swap = () => ({
     ok: true,
-    backup: '/home/u/.remote-mcp-tmp-backup',
+    backup: '/home/u/.remote-mcp-tmp-0123456789abcdef',
     run: state.mkRun(0),
     rolledBack: false,
   });

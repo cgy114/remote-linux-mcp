@@ -3,14 +3,18 @@ import { runSshCommand } from '../pipeline/run-command.js';
 import { buildSftpArgv, type SshMode } from '../policy/argv.js';
 import { buildChildEnv } from '../ssh/env.js';
 import { runSftp } from '../ssh/runner.js';
-import type { ToolContext } from '../tools/common.js';
-import type { RunResult } from '../types.js';
+import type { Logger, RunResult } from '../types.js';
 import type { FileLimits } from './file-policy.js';
 
-/** 传输操作的共享依赖；deadlineMs 是本工具调用的绝对截止时间（epoch ms）。 */
+/**
+ * 传输操作的共享依赖（不依赖 ToolContext；由 tools 层组装）。
+ * deadlineMs 是本工具调用的绝对截止时间（epoch ms）。
+ */
 export interface TransferDeps {
   target: ResolvedTarget;
-  ctx: ToolContext;
+  /** 校验 host key 用的 known_hosts 路径。 */
+  knownHostsFile: string;
+  log: Logger;
   limits: FileLimits;
   deadlineMs: number;
   /** 远端 home（已解析）；未解析时由 probe 按需获取。 */
@@ -45,7 +49,7 @@ export async function runRemoteCommand(
   const timeoutMs = Math.min(requested, remainingMs(deps));
   return runSshCommand({
     host: deps.target.host,
-    knownHostsFile: deps.ctx.paths.knownHostsFile,
+    knownHostsFile: deps.knownHostsFile,
     remoteCommand: command,
     timeoutMs,
     maxOutputBytes: opts.maxOutputBytes ?? deps.target.config.defaults.maxOutputBytes,
@@ -75,7 +79,7 @@ export async function runSftpSteps(
 ): Promise<RunResult> {
   const { argv } = buildSftpArgv({
     host: deps.target.host,
-    knownHostsFile: deps.ctx.paths.knownHostsFile,
+    knownHostsFile: deps.knownHostsFile,
     ...(opts.extra !== undefined ? { extra: opts.extra } : {}),
     mode: 'strict',
   });

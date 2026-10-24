@@ -3,8 +3,7 @@ import type { ToolError } from '../types.js';
 import { hashLocalFile } from './checksum.js';
 import type { TransferDeps } from './deps.js';
 import { remoteFailure } from './errors.js';
-import { diffManifests, type ManifestEntry } from './manifest.js';
-import { probeRemoteManifest, probeRemotePath } from './probe.js';
+import { probeRemotePath } from './probe.js';
 
 /** 校验失败统一为 RemoteExit 类别，code 描述具体不一致。 */
 export function verifyFailure(
@@ -116,34 +115,3 @@ export async function verifyLocalFile(
   return undefined;
 }
 
-export interface VerifyRemoteManifestInput {
-  root: string;
-  expected: readonly ManifestEntry[];
-}
-
-/** 校验远端目录清单；undefined 表示通过。 */
-export async function verifyRemoteManifest(
-  deps: TransferDeps,
-  input: VerifyRemoteManifestInput,
-): Promise<ToolError | undefined> {
-  const probe = await probeRemoteManifest(deps, input.root, {
-    maxFiles: deps.limits.maxFiles,
-    maxDepth: deps.limits.maxDepth,
-  });
-  if (!probe.ok) return probe.error;
-  const diff = diffManifests(input.expected, probe.entries);
-  if (diff.missing.length === 0 && diff.extra.length === 0 && diff.changed.length === 0) {
-    return undefined;
-  }
-  const sample = [
-    ...diff.missing.map((entry) => `missing:${entry.path}`),
-    ...diff.extra.map((entry) => `extra:${entry.path}`),
-    ...diff.changed.map((change) => `changed:${change.path}`),
-  ].slice(0, 10);
-  return verifyFailure('verify_manifest_mismatch', 'remote directory manifest differs', {
-    missing: diff.missing.length,
-    extra: diff.extra.length,
-    changed: diff.changed.length,
-    sample,
-  });
-}

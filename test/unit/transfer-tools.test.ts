@@ -143,7 +143,6 @@ function makeConfig(localRoots: string[] = [root], remoteDeny: string[] = []): R
     maxTotalBytes: 10_000,
     maxDepth: 10,
     transferTimeoutMs: 30_000,
-    verify: 'manifest' as const,
   };
   return {
     version: 1,
@@ -309,7 +308,7 @@ describe('prepare plans', () => {
     ]);
   });
 
-  it('maps local_path_denied to local_root_not_allowed for uploads', async () => {
+  it('rejects uploads outside local_roots with local_root_not_allowed', async () => {
     await expect(
       buildUploadPlan(
         { local_path: path.join(outsideRoot, 'secret.txt'), remote_path: '~/x' },
@@ -357,7 +356,7 @@ describe('prepare plans', () => {
         { remote_path: '~/a.txt', local_path: path.join(outsideRoot, 'x') },
         makeTarget(),
       ),
-    ).rejects.toMatchObject({ code: 'local_path_denied' });
+    ).rejects.toMatchObject({ code: 'local_root_not_allowed' });
 
     await expect(
       buildDownloadPlan(
@@ -565,7 +564,7 @@ describe('tool wiring: audit and formatting', () => {
         ok: false,
         failure: {
           kind: 'Policy',
-          code: 'local_path_denied',
+          code: 'local_root_not_allowed',
           message: 'denied',
           retryable: false,
         },
@@ -575,7 +574,7 @@ describe('tool wiring: audit and formatting', () => {
       ctx,
     );
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toMatchObject({ error: { code: 'local_path_denied' } });
+    expect(result.structuredContent).toMatchObject({ error: { code: 'local_root_not_allowed' } });
   });
 });
 

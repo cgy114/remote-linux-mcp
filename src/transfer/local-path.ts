@@ -63,13 +63,6 @@ export function isLocalContained(root: string, candidate: string): boolean {
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
 
-/** 候选路径不在 root 内时抛 local_path_denied。 */
-export function assertLocalContained(root: string, candidate: string): void {
-  if (!isLocalContained(root, candidate)) {
-    throw localUsage('local_path_denied', 'local path is outside the allowed roots');
-  }
-}
-
 interface ResolvedRoots {
   lexical: string[];
   real: string[];
@@ -89,13 +82,14 @@ async function resolveRoots(roots: readonly string[]): Promise<ResolvedRoots> {
   return { lexical, real };
 }
 
+/** 候选路径不在任何白名单 root 内时抛 local_root_not_allowed。 */
 function assertContainedInAny(roots: ResolvedRoots, candidate: string): void {
   for (let i = 0; i < roots.lexical.length; i++) {
     const lexical = roots.lexical[i]!;
     const real = roots.real[i]!;
     if (isLocalContained(lexical, candidate) || isLocalContained(real, candidate)) return;
   }
-  throw localUsage('local_path_denied', 'local path is outside the allowed roots');
+  throw localUsage('local_root_not_allowed', 'local path is outside the allowed roots');
 }
 
 function lstatError(err: unknown, missingCode: string, what: string): UsageError {

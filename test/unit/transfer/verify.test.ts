@@ -3,21 +3,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TransferDeps } from '../../../src/transfer/deps.js';
-import type { ManifestEntry } from '../../../src/transfer/manifest.js';
 
 const state = vi.hoisted(() => ({
   path: null as null | ((...args: unknown[]) => Promise<unknown>),
-  manifest: null as null | ((...args: unknown[]) => Promise<unknown>),
 }));
 
 vi.mock('../../../src/transfer/probe.js', () => ({
   probeRemotePath: async (...args: unknown[]) => state.path!(...args),
-  probeRemoteManifest: async (...args: unknown[]) => state.manifest!(...args),
 }));
 
-const { verifyLocalFile, verifyRemoteFile, verifyRemoteManifest } = await import(
-  '../../../src/transfer/verify.js'
-);
+const { verifyLocalFile, verifyRemoteFile } = await import('../../../src/transfer/verify.js');
 
 const ABC_SHA = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad';
 
@@ -81,28 +76,6 @@ describe('verify', () => {
       });
       const failure = await verifyRemoteFile(deps, { path: '~/a' });
       expect(failure?.kind).toBe('Timeout');
-    });
-  });
-
-  describe('verifyRemoteManifest', () => {
-    const entry: ManifestEntry = {
-      path: 'a.txt',
-      type: 'file',
-      size: 3,
-      mode: 0o644,
-      sha256: ABC_SHA,
-    };
-
-    it('passes identical manifests', async () => {
-      state.manifest = async () => ({ ok: true, entries: [entry] });
-      await expect(verifyRemoteManifest(deps, { root: '~/t', expected: [entry] })).resolves.toBeUndefined();
-    });
-
-    it('reports a manifest mismatch with counts and sample paths', async () => {
-      state.manifest = async () => ({ ok: true, entries: [{ ...entry, size: 4 }] });
-      const failure = await verifyRemoteManifest(deps, { root: '~/t', expected: [entry] });
-      expect(failure?.code).toBe('verify_manifest_mismatch');
-      expect(failure?.details).toMatchObject({ missing: 0, extra: 0, changed: 1, sample: ['changed:a.txt'] });
     });
   });
 

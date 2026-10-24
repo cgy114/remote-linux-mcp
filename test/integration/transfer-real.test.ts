@@ -129,7 +129,6 @@ describe.skipIf(!E2E)('integration: file transfer on real host (orangepi)', () =
       '  max_total_bytes: 33554432',
       '  max_depth: 32',
       '  transfer_timeout_ms: 120000',
-      '  verify: manifest',
       'hosts:',
       '  orangepi:',
       '    host: 100.115.38.14',
@@ -327,9 +326,13 @@ describe.skipIf(!E2E)('integration: file transfer on real host (orangepi)', () =
     }
 
     // Windows 的 tar 实现无法解出符号链接（需要 SeCreateSymbolicLinkPrivilege）。
+    // 只跳过 symlink 本身：先在远端删除它，再继续目录下载与内容校验。
+    let removedRemoteSymlink = false;
     if (symlinkSupported && IS_WIN) {
-      console.warn('[e2e] tree download sub-case skipped: Windows cannot extract symlinks');
-      return;
+      console.warn('[e2e] removing remote symlink before download: Windows cannot extract symlinks');
+      const removed = await runRemote(`rm -f -- ${shq(`${remoteTree}/link.txt`)}`);
+      expect(removed.isError, textOf(removed)).not.toBe(true);
+      removedRemoteSymlink = true;
     }
 
     const down = path.join(localRoot, 'tree-download');
@@ -346,6 +349,9 @@ describe.skipIf(!E2E)('integration: file transfer on real host (orangepi)', () =
     expect(
       Buffer.compare(await fs.readFile(path.join(down, 'sub', 'b.bin')), Buffer.from([0, 1, 2, 3, 4])),
     ).toBe(0);
+    if (removedRemoteSymlink) {
+      await expect(fs.access(path.join(down, 'link.txt'))).rejects.toBeTruthy();
+    }
   }, TEST_TIMEOUT_MS);
 
   it('round-trips a filename containing spaces and CJK characters', async () => {

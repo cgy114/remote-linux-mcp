@@ -84,20 +84,18 @@ function localExecutor(home: string): (command: string) => Promise<RunResult> {
   };
 }
 
-function makeDeps(overrides: Partial<TransferDeps> = {}): TransferDeps {
+function makeDeps(
+  overrides: Partial<TransferDeps> = {},
+  destination = 'deploy@10.0.0.5:22',
+): TransferDeps {
   return {
     target: {
       config: { defaults: { maxOutputBytes: 1048576 } },
       host: { alias: 'web1', cwd: '~', timeouts: { connectMs: 5000, commandMs: 15000, checkMs: 8000 } },
-      destination: 'deploy@10.0.0.5:22',
+      destination,
     },
-    ctx: {
-      paths: { knownHostsFile: 'C:\\cfg\\known_hosts' },
-      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() },
-      getConfig: async () => {
-        throw new Error('not used');
-      },
-    },
+    knownHostsFile: 'C:\\cfg\\known_hosts',
+    log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() },
     limits: { maxFileBytes: 1000, maxFiles: 100, maxTotalBytes: 10000, maxDepth: 10 },
     deadlineMs: Date.now() + 60_000,
     ...overrides,
@@ -225,15 +223,47 @@ describe.skipIf(!BASH_OK)('probe (local bash simulation)', () => {
   });
 
   describe('resolveRemoteHome', () => {
-    it('caches per deps and returns the printed home', async () => {
+    it('caches by destination and returns the printed home', async () => {
       state.executor = async (command) => {
         if (command === 'printf \'%s\' "$HOME"') return runResult(0, state.home, '');
         return runResult(0, '', '');
       };
-      const deps = makeDeps();
+      const deps = makeDeps({}, 'deploy@cache.test:22');
       await expect(resolveRemoteHome(deps)).resolves.toBe(state.home);
       await expect(resolveRemoteHome(deps)).resolves.toBe(state.home);
       expect(state.homeCalls).toBe(1);
+    });
+
+    it('reuses one probe for different deps instances with the same destination', async () => {
+      state.executor = async (command) =>
+        command === 'printf \'%s\' "$HOME"'
+          ? runResult(0, state.home, '')
+          : runResult(0, '', '');
+      // 模拟两次独立的工具调用：不同的 deps 对象，同一 destination。
+      const first = makeDeps({}, 'deploy@shared.test:22');
+      const second = makeDeps({}, 'deploy@shared.test:22');
+      expect(second).not.toBe(first);
+      await expect(resolveRemoteHome(first)).resolves.toBe(state.home);
+      await expect(resolveRemoteHome(second)).resolves.toBe(state.home);
+      expect(state.homeCalls).toBe(1);
+    });
+
+    it('re-probes after the 5 minute TTL', async () => {
+      vi.useFakeTimers();
+      try {
+        state.executor = async (command) =>
+          command === 'printf \'%s\' "$HOME"'
+            ? runResult(0, state.home, '')
+            : runResult(0, '', '');
+        const deps = makeDeps({}, 'deploy@ttl.test:22');
+        await expect(resolveRemoteHome(deps)).resolves.toBe(state.home);
+        expect(state.homeCalls).toBe(1);
+        vi.setSystemTime(Date.now() + 5 * 60_000 + 1);
+        await expect(resolveRemoteHome(deps)).resolves.toBe(state.home);
+        expect(state.homeCalls).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('uses deps.home without running a command', async () => {
@@ -247,7 +277,7 @@ describe.skipIf(!BASH_OK)('probe (local bash simulation)', () => {
         command === 'printf \'%s\' "$HOME"'
           ? runResult(255, '', 'Connection closed by 10.0.0.5')
           : runResult(0, '', '');
-      const err: unknown = await resolveRemoteHome(makeDeps()).then(
+      const err: unknown = await resolveRemoteHome(makeDeps({}, 'deploy@fail.test:22')).then(
         () => undefined,
         (e: unknown) => e,
       );
@@ -269,7 +299,7 @@ describe.skipIf(!BASH_OK)('probe (local bash simulation)', () => {
         if (command !== 'printf \'%s\' "$HOME"') return base;
         return { ...base, exitCode: null, timedOut: true, durationMs: 30_000 };
       };
-      const timedOut: unknown = await resolveRemoteHome(makeDeps()).then(
+      const timedOut: unknown = await resolveRemoteHome(makeDeps({}, 'deploy@timeout.test:22')).then(
         () => undefined,
         (e: unknown) => e,
       );
@@ -284,7 +314,7 @@ describe.skipIf(!BASH_OK)('probe (local bash simulation)', () => {
         if (command !== 'printf \'%s\' "$HOME"') return base;
         return { ...base, exitCode: null, spawnError: { code: 'ENOENT', message: 'missing ssh' } };
       };
-      const spawn: unknown = await resolveRemoteHome(makeDeps()).then(
+      const spawn: unknown = await resolveRemoteHome(makeDeps({}, 'deploy@spawn.test:22')).then(
         () => undefined,
         (e: unknown) => e,
       );
@@ -295,12 +325,14 @@ describe.skipIf(!BASH_OK)('probe (local bash simulation)', () => {
     });
 
     it('maps empty or invalid home output to Internal remote_home_resolution_failed', async () => {
-      for (const value of ['', 'relative/path', '/bad\nvalue']) {
+      for (const [index, value] of ['', 'relative/path', '/bad\nvalue'].entries()) {
         state.executor = async (command) =>
           command === 'printf \'%s\' "$HOME"'
             ? runResult(0, value, '')
             : runResult(0, '', '');
-        const err: unknown = await resolveRemoteHome(makeDeps()).then(
+        const err: unknown = await resolveRemoteHome(
+          makeDeps({}, `deploy@invalid${String(index)}.test:22`),
+        ).then(
           () => undefined,
           (e: unknown) => e,
         );

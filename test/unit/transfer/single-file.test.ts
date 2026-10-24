@@ -31,7 +31,7 @@ const state = vi.hoisted(() => {
     verifyLocal: (() => undefined) as () => unknown,
     swap: (() => ({
       ok: true,
-      backup: '/home/u/.remote-mcp-tmp-backup',
+      backup: '/home/u/.remote-mcp-tmp-0123456789abcdef',
       run: mkRun(0),
       rolledBack: false,
     })) as () => unknown,
@@ -60,9 +60,10 @@ vi.mock('../../../src/transfer/verify.js', () => ({
 }));
 
 vi.mock('../../../src/transfer/stage.js', () => ({
+  assertRemoteTempPath: () => undefined,
   newRemoteTempPath: (target: string) => {
     const idx = target.lastIndexOf('/');
-    return `${target.slice(0, idx)}/.remote-mcp-tmp-test`;
+    return `${target.slice(0, idx)}/.remote-mcp-tmp-0123456789abcdef`;
   },
   swapRemoteIntoPlace: async () => {
     state.events.push('swap');
@@ -116,13 +117,8 @@ function makeDeps(home = '/home/u'): TransferDeps {
       },
       destination: 'deploy@10.0.0.5:22',
     },
-    ctx: {
-      paths: { configDir: 'C:\\cfg', knownHostsFile: 'C:\\cfg\\known_hosts' },
-      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() },
-      getConfig: async () => {
-        throw new Error('not used');
-      },
-    },
+    knownHostsFile: 'C:\\cfg\\known_hosts',
+    log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() },
     limits: { maxFileBytes: 1_000_000, maxFiles: 100, maxTotalBytes: 10_000_000, maxDepth: 10 },
     deadlineMs: Date.now() + 60_000,
     home,
@@ -182,7 +178,7 @@ function reset(): void {
   state.verifyLocal = () => undefined;
   state.swap = () => ({
     ok: true,
-    backup: '/home/u/.remote-mcp-tmp-backup',
+    backup: '/home/u/.remote-mcp-tmp-0123456789abcdef',
     run: state.mkRun(0),
     rolledBack: false,
   });
@@ -236,7 +232,7 @@ describe('single-file transfer state machines', () => {
       // 同目录远端临时文件：put + chmod 一次 batch。
       expect(state.steps[0]).toHaveLength(2);
       expect(state.steps[0]![0]).toContain('put ');
-      expect(state.steps[0]![0]).toContain('/.remote-mcp-tmp-test');
+      expect(state.steps[0]![0]).toContain('/.remote-mcp-tmp-0123456789abcdef');
       expect(state.steps[0]![1]).toContain('chmod 640');
     });
 
