@@ -5,7 +5,8 @@ remote-mcp 安装/升级脚本（Windows PowerShell 5.1）。
 
 .DESCRIPTION
 以 user scope 注册 MCP server，生成/校验配置，并在需要时安装依赖与构建。
--DryRun（或 -WhatIf）只做只读检查，不创建目录、不运行 npm、不注册、不写状态。
+-DryRun（或 -WhatIf）只做只读检查，不创建目录、不运行 npm、不注册、不写状态；
+即使指定 -LogPath 也不写日志（DryRun 严格零写入）。
 
 退出码：
   0 成功
@@ -38,11 +39,19 @@ $script:IsDryRun = ($DryRun.IsPresent -or $WhatIfPreference)
 # 只读 cmdlet（如 Get-FileHash）会响应 -WhatIf 并打印噪声；本脚本用自己的 IsDryRun 控制写操作。
 $WhatIfPreference = $false
 $script:LogPath = $null
+$script:RequestedLogPath = $null
 if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
-    $script:LogPath = [System.IO.Path]::GetFullPath($LogPath)
-    if (Test-Path -LiteralPath $script:LogPath -PathType Container) {
+    $resolvedLogPath = [System.IO.Path]::GetFullPath($LogPath)
+    if (Test-Path -LiteralPath $resolvedLogPath -PathType Container) {
         Write-Host '[ERROR] -LogPath 必须指向文件，而不是目录。' -ForegroundColor Red
         exit 2
+    }
+    if ($script:IsDryRun) {
+        # DryRun 严格零写入：只记录用户意图，不创建日志目录或文件。
+        $script:RequestedLogPath = $resolvedLogPath
+    }
+    else {
+        $script:LogPath = $resolvedLogPath
     }
 }
 
@@ -103,6 +112,9 @@ Write-Step -Tag INFO -Message "remote-mcp 安装程序 v$($ctx.Version)" -LogPat
 Write-Step -Tag INFO -Message "仓库：$($ctx.InstallRoot)" -LogPath $script:LogPath
 if ($script:IsDryRun) {
     Write-Step -Tag WOULD -Message 'DryRun 模式：只做只读检查，不会修改任何文件或注册。' -LogPath $script:LogPath
+    if ($script:RequestedLogPath) {
+        Write-Step -Tag WOULD -Message "DryRun 不写日志，已忽略 -LogPath：$($script:RequestedLogPath)" -LogPath $script:LogPath
+    }
 }
 
 if ($PSVersionTable.PSVersion.Major -lt 5) {

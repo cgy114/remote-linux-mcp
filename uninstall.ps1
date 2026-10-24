@@ -6,6 +6,8 @@ remote-mcp 卸载脚本（Windows PowerShell 5.1）。
 .DESCRIPTION
 默认只移除 MCP 注册和安装状态，保留 ~/.remote-mcp 下的配置、信任记录与审计数据。
 -RemoveData 会先做安全路径检查，再删除数据目录；非交互运行必须同时指定 -Yes。
+数据目录的 basename 必须是 .remote-mcp；其他目录必须显式指定 -ForcePath。
+-DryRun（或 -WhatIf）只做只读检查，即使指定 -LogPath 也不写日志（DryRun 严格零写入）。
 
 退出码：
   0 成功
@@ -20,7 +22,8 @@ param(
     [switch]$RemoveData,
     [switch]$Yes,
     [string]$ConfigPath,
-    [switch]$ForcePath
+    [switch]$ForcePath,
+    [string]$LogPath
 )
 
 Set-StrictMode -Version 2.0
@@ -30,13 +33,30 @@ $script:IsDryRun = ($DryRun.IsPresent -or $WhatIfPreference)
 # 只读 cmdlet 会响应 -WhatIf 并打印噪声；本脚本用自己的 IsDryRun 控制写操作。
 $WhatIfPreference = $false
 
+$script:LogPath = $null
+$script:RequestedLogPath = $null
+if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+    $resolvedLogPath = [System.IO.Path]::GetFullPath($LogPath)
+    if (Test-Path -LiteralPath $resolvedLogPath -PathType Container) {
+        Write-Host '[ERROR] -LogPath 必须指向文件，而不是目录。' -ForegroundColor Red
+        exit 2
+    }
+    if ($script:IsDryRun) {
+        # DryRun 严格零写入：只记录用户意图，不创建日志目录或文件。
+        $script:RequestedLogPath = $resolvedLogPath
+    }
+    else {
+        $script:LogPath = $resolvedLogPath
+    }
+}
+
 function Exit-Uninstall {
     param(
         [Parameter(Mandatory = $true)][int]$Code,
         [string]$Message
     )
     if (-not [string]::IsNullOrWhiteSpace($Message)) {
-        Write-Step -Tag ERROR -Message $Message
+        Write-Step -LogPath $script:LogPath -Tag ERROR -Message $Message
     }
     exit $Code
 }
@@ -168,6 +188,12 @@ function Test-SafeDataPath {
     $full = Get-NormalizedFullPath $Path
     $driveRoot = [System.IO.Path]::GetPathRoot($full)
 
+    # 数据目录名必须是 .remote-mcp；-ForcePath 同时用于确认非标准 basename。
+    $leaf = Split-Path -Leaf $full
+    if (-not $AllowOutsideHome -and -not [string]::Equals($leaf, '.remote-mcp', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $errors.Add("拒绝删除：数据目录 basename 必须是 .remote-mcp（当前：'$leaf'）；如确认安全，请追加 -ForcePath。")
+    }
+
     if (Test-PathEquals $full $driveRoot) {
         $errors.Add('拒绝删除盘符根目录。')
     }
@@ -270,13 +296,16 @@ if ([string]::IsNullOrWhiteSpace($dataDir)) {
 $dataDir = Get-NormalizedFullPath $dataDir
 
 if ($Yes -and -not $RemoveData) {
-    Write-Step -Tag WARN -Message '-Yes 只在与 -RemoveData 一起使用时生效。'
+    Write-Step -LogPath $script:LogPath -Tag WARN -Message '-Yes 只在与 -RemoveData 一起使用时生效。'
 }
 
-Write-Step -Tag INFO -Message 'remote-mcp 卸载程序'
-Write-Step -Tag INFO -Message "仓库：$($ctx.InstallRoot)"
+Write-Step -LogPath $script:LogPath -Tag INFO -Message 'remote-mcp 卸载程序'
+Write-Step -LogPath $script:LogPath -Tag INFO -Message "仓库：$($ctx.InstallRoot)"
 if ($script:IsDryRun) {
-    Write-Step -Tag WOULD -Message 'DryRun 模式：只做只读检查，不会修改注册、状态或数据。'
+    Write-Step -LogPath $script:LogPath -Tag WOULD -Message 'DryRun 模式：只做只读检查，不会修改注册、状态或数据。'
+    if ($script:RequestedLogPath) {
+        Write-Step -LogPath $script:LogPath -Tag WOULD -Message "DryRun 不写日志，已忽略 -LogPath：$($script:RequestedLogPath)"
+    }
 }
 
 $claudePath = Resolve-ExternalCommand -Name 'claude' -PreferredExtensions @('.cmd', '.exe')
@@ -286,20 +315,20 @@ if ($claudePath) {
 }
 
 if (-not $claudePath) {
-    Write-Step -Tag WARN -Message '未找到 claude 命令，无法检查或移除 MCP 注册。'
+    Write-Step -LogPath $script:LogPath -Tag WARN -Message '未找到 claude 命令，无法检查或移除 MCP 注册。'
 }
 elseif ($registration -and $registration.Exists) {
-    Write-Step -Tag INFO -Message "MCP 注册：已注册（scope=$($registration.Scope)，状态=$($registration.Status)）"
+    Write-Step -LogPath $script:LogPath -Tag INFO -Message "MCP 注册：已注册（scope=$($registration.Scope)，状态=$($registration.Status)）"
 }
 else {
-    Write-Step -Tag SKIP -Message 'MCP 注册：未注册。'
+    Write-Step -LogPath $script:LogPath -Tag SKIP -Message 'MCP 注册：未注册。'
 }
 
 if (Test-Path -LiteralPath $ctx.StatePath -PathType Leaf) {
-    Write-Step -Tag INFO -Message "安装状态：$($ctx.StatePath)"
+    Write-Step -LogPath $script:LogPath -Tag INFO -Message "安装状态：$($ctx.StatePath)"
 }
 else {
-    Write-Step -Tag SKIP -Message "安装状态：不存在（$($ctx.StatePath)）。"
+    Write-Step -LogPath $script:LogPath -Tag SKIP -Message "安装状态：不存在（$($ctx.StatePath)）。"
 }
 
 $dataSummary = [pscustomobject]@{
@@ -315,19 +344,21 @@ $dataSummary = [pscustomobject]@{
 
 $safeDataPath = $null
 if ($RemoveData) {
-    if ($dataSummary.Exists) {
-        # 先校验，避免对 C:\ 或用户主目录这类危险目标做全量统计。
-        $safeDataPath = Test-SafeDataPath -Path $dataDir -Context $ctx -AllowOutsideHome:$ForcePath
-        if (-not $safeDataPath.Ok) {
-            foreach ($safetyError in $safeDataPath.Errors) {
-                Write-Step -Tag ERROR -Message $safetyError
-            }
-            exit 3
+    # 先校验，且校验必须先于存在性判断：不存在的数据目录同样要检查 basename，
+    # 否则 -ConfigPath 指向任意目录时会因“目录不存在”而绕过保护。
+    # 先校验也避免对 C:\ 或用户主目录这类危险目标做全量统计。
+    $safeDataPath = Test-SafeDataPath -Path $dataDir -Context $ctx -AllowOutsideHome:$ForcePath
+    if (-not $safeDataPath.Ok) {
+        foreach ($safetyError in $safeDataPath.Errors) {
+            Write-Step -LogPath $script:LogPath -Tag ERROR -Message $safetyError
         }
-        Write-Step -Tag OK -Message "数据目录安全校验通过：$($safeDataPath.FullPath)"
+        exit 3
+    }
+    Write-Step -LogPath $script:LogPath -Tag OK -Message "数据目录安全校验通过：$($safeDataPath.FullPath)"
 
+    if ($dataSummary.Exists) {
         $dataSummary = Get-DataDirSummary -Path $dataDir
-        Write-Step -Tag INFO -Message "数据目录：$dataDir（$($dataSummary.FileCount) 个文件，$(Format-Bytes $dataSummary.TotalBytes)）"
+        Write-Step -LogPath $script:LogPath -Tag INFO -Message "数据目录：$dataDir（$($dataSummary.FileCount) 个文件，$(Format-Bytes $dataSummary.TotalBytes)）"
 
         if (-not $script:IsDryRun -and -not $Yes) {
             $interactive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
@@ -341,20 +372,20 @@ if ($RemoveData) {
         }
     }
     else {
-        Write-Step -Tag SKIP -Message '数据目录不存在，无需删除。'
+        Write-Step -LogPath $script:LogPath -Tag SKIP -Message '数据目录不存在，无需删除。'
     }
 }
 elseif ($dataSummary.Exists) {
     if (Test-PathEquals $dataDir $ctx.ConfigDir) {
         $dataSummary = Get-DataDirSummary -Path $dataDir
-        Write-Step -Tag INFO -Message "数据目录：$dataDir（$($dataSummary.FileCount) 个文件，$(Format-Bytes $dataSummary.TotalBytes)）"
+        Write-Step -LogPath $script:LogPath -Tag INFO -Message "数据目录：$dataDir（$($dataSummary.FileCount) 个文件，$(Format-Bytes $dataSummary.TotalBytes)）"
     }
     else {
-        Write-Step -Tag INFO -Message "数据目录：$dataDir（默认保留，未统计）"
+        Write-Step -LogPath $script:LogPath -Tag INFO -Message "数据目录：$dataDir（默认保留，未统计）"
     }
 }
 else {
-    Write-Step -Tag SKIP -Message "数据目录：不存在（$dataDir）。"
+    Write-Step -LogPath $script:LogPath -Tag SKIP -Message "数据目录：不存在（$dataDir）。"
 }
 
 # ---------------------------------------------------------------------------
@@ -362,13 +393,13 @@ else {
 # ---------------------------------------------------------------------------
 
 if (-not $claudePath) {
-    Write-Step -Tag WARN -Message '跳过 MCP 注册移除（未找到 claude）。'
+    Write-Step -LogPath $script:LogPath -Tag WARN -Message '跳过 MCP 注册移除（未找到 claude）。'
 }
 elseif (-not $registration -or -not $registration.Exists) {
-    Write-Step -Tag SKIP -Message 'MCP 注册不存在，跳过。'
+    Write-Step -LogPath $script:LogPath -Tag SKIP -Message 'MCP 注册不存在，跳过。'
 }
 elseif ($script:IsDryRun) {
-    Write-Step -Tag WOULD -Message "将从 scope=$($registration.Scope) 移除 MCP 注册：$($ctx.McpName)"
+    Write-Step -LogPath $script:LogPath -Tag WOULD -Message "将从 scope=$($registration.Scope) 移除 MCP 注册：$($ctx.McpName)"
 }
 else {
     $removeResult = Remove-McpRegistration -Name $ctx.McpName -ClaudePath $claudePath
@@ -376,10 +407,10 @@ else {
         Exit-Uninstall -Code 4 -Message "MCP 注册移除失败：$($removeResult.Message)"
     }
     if ($removeResult.Removed) {
-        Write-Step -Tag OK -Message 'MCP 注册已移除。'
+        Write-Step -LogPath $script:LogPath -Tag OK -Message 'MCP 注册已移除。'
     }
     else {
-        Write-Step -Tag SKIP -Message 'MCP 注册不存在，跳过。'
+        Write-Step -LogPath $script:LogPath -Tag SKIP -Message 'MCP 注册不存在，跳过。'
     }
 }
 
@@ -388,17 +419,17 @@ else {
 # ---------------------------------------------------------------------------
 
 if (-not (Test-Path -LiteralPath $ctx.StatePath -PathType Leaf)) {
-    Write-Step -Tag SKIP -Message '安装状态不存在，跳过。'
+    Write-Step -LogPath $script:LogPath -Tag SKIP -Message '安装状态不存在，跳过。'
 }
 elseif ($script:IsDryRun) {
-    Write-Step -Tag WOULD -Message "将删除安装状态：$($ctx.StatePath)"
+    Write-Step -LogPath $script:LogPath -Tag WOULD -Message "将删除安装状态：$($ctx.StatePath)"
 }
 else {
     $stateResult = Remove-InstallState -StatePath $ctx.StatePath
     if (-not $stateResult.Ok) {
         Exit-Uninstall -Code 5 -Message $stateResult.Message
     }
-    Write-Step -Tag OK -Message $stateResult.Message
+    Write-Step -LogPath $script:LogPath -Tag OK -Message $stateResult.Message
 }
 
 # ---------------------------------------------------------------------------
@@ -406,10 +437,10 @@ else {
 # ---------------------------------------------------------------------------
 
 if (-not $RemoveData) {
-    Write-Step -Tag SKIP -Message "保留数据目录：$dataDir（配置、信任记录、审计数据均未删除）。"
+    Write-Step -LogPath $script:LogPath -Tag SKIP -Message "保留数据目录：$dataDir（配置、信任记录、审计数据均未删除）。"
 }
 elseif (-not $dataSummary.Exists) {
-    Write-Step -Tag SKIP -Message '数据目录不存在，跳过删除。'
+    Write-Step -LogPath $script:LogPath -Tag SKIP -Message '数据目录不存在，跳过删除。'
 }
 else {
     $credentialRefs = @(Get-CredentialRefs -ConfigFile $effectiveConfigPath)
@@ -434,37 +465,37 @@ else {
     }
 
     if ($credentialRefs.Count -eq 0) {
-        Write-Step -Tag SKIP -Message '配置中未发现 credential 引用。'
+        Write-Step -LogPath $script:LogPath -Tag SKIP -Message '配置中未发现 credential 引用。'
     }
     elseif (-not $nodeForCredential -or -not $cliForCredential) {
-        Write-Step -Tag WARN -Message '无法调用 credential delete（缺少 node 或 dist/cli.js），请手动检查系统凭据库。'
+        Write-Step -LogPath $script:LogPath -Tag WARN -Message '无法调用 credential delete（缺少 node 或 dist/cli.js），请手动检查系统凭据库。'
     }
     else {
         foreach ($ref in $credentialRefs) {
             if ($script:IsDryRun) {
-                Write-Step -Tag WOULD -Message "将尝试删除系统凭据：$ref"
+                Write-Step -LogPath $script:LogPath -Tag WOULD -Message "将尝试删除系统凭据：$ref"
                 continue
             }
             $credentialOutput = & $nodeForCredential $cliForCredential credential delete $ref 2>&1
             $credentialCode = $LASTEXITCODE
             if ($credentialCode -eq 0) {
-                Write-Step -Tag OK -Message "已删除系统凭据：$ref"
+                Write-Step -LogPath $script:LogPath -Tag OK -Message "已删除系统凭据：$ref"
             }
             else {
                 $credentialText = Convert-NativeOutput $credentialOutput
-                Write-Step -Tag WARN -Message "删除系统凭据 $ref 未成功（退出码 $credentialCode）：$credentialText"
+                Write-Step -LogPath $script:LogPath -Tag WARN -Message "删除系统凭据 $ref 未成功（退出码 $credentialCode）：$credentialText"
             }
         }
     }
 
     if ($script:IsDryRun) {
-        Write-Step -Tag WOULD -Message "将删除数据目录：$dataDir（$($dataSummary.FileCount) 个文件，$(Format-Bytes $dataSummary.TotalBytes)）"
+        Write-Step -LogPath $script:LogPath -Tag WOULD -Message "将删除数据目录：$dataDir（$($dataSummary.FileCount) 个文件，$(Format-Bytes $dataSummary.TotalBytes)）"
     }
     else {
         $recheck = Test-SafeDataPath -Path $dataDir -Context $ctx -AllowOutsideHome:$ForcePath
         if (-not $recheck.Ok) {
             foreach ($safetyError in $recheck.Errors) {
-                Write-Step -Tag ERROR -Message $safetyError
+                Write-Step -LogPath $script:LogPath -Tag ERROR -Message $safetyError
             }
             exit 3
         }
@@ -479,7 +510,7 @@ else {
         if (Test-Path -LiteralPath $dataDir) {
             Exit-Uninstall -Code 5 -Message "删除后数据目录仍然存在：$dataDir"
         }
-        Write-Step -Tag OK -Message "数据目录已删除：$dataDir"
+        Write-Step -LogPath $script:LogPath -Tag OK -Message "数据目录已删除：$dataDir"
     }
 }
 
@@ -489,14 +520,14 @@ else {
 
 Write-Host ''
 if ($script:IsDryRun) {
-    Write-Step -Tag OK -Message 'DryRun 完成：未修改注册、安装状态或数据。'
+    Write-Step -LogPath $script:LogPath -Tag OK -Message 'DryRun 完成：未修改注册、安装状态或数据。'
 }
 else {
-    Write-Step -Tag OK -Message '卸载完成。'
+    Write-Step -LogPath $script:LogPath -Tag OK -Message '卸载完成。'
     if (-not $RemoveData) {
-        Write-Step -Tag INFO -Message "数据仍保留在 $dataDir；如需彻底删除，请重新运行并指定 -RemoveData -Yes。"
+        Write-Step -LogPath $script:LogPath -Tag INFO -Message "数据仍保留在 $dataDir；如需彻底删除，请重新运行并指定 -RemoveData -Yes。"
     }
-    Write-Step -Tag INFO -Message '请重启 Claude Code，使已移除的 MCP server 从列表中消失。'
+    Write-Step -LogPath $script:LogPath -Tag INFO -Message '请重启 Claude Code，使已移除的 MCP server 从列表中消失。'
 }
 
 exit 0

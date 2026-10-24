@@ -11,6 +11,10 @@ npm run build
 npm test
 ```
 
+> **Windows / PowerShell 下运行测试**：直接运行 `npm test` 时，PATH 可能命中 WSL 的 `bash`，
+> 导致 7 项依赖本地 bash 的模拟测试失败。请在 **Git Bash** 中运行 `npm test`，或使用
+> `scripts/e2e.ps1`（它会自动把 Git Bash 的 `usr\bin` 前置到 PATH）。`npm test` 的行为不做修改。
+
 ## 作为 MCP server 运行
 
 ```bash
@@ -69,7 +73,7 @@ node .\dist\cli.js credential set sudo.web1
 
 | 参数 | 说明 |
 | --- | --- |
-| `-DryRun` / `-WhatIf` | 只读检查，打印 `[OK]` / `[WOULD]` / `[SKIP]`；不运行 npm、不建目录、不注册、不写状态、不跑 `mcp list` |
+| `-DryRun` / `-WhatIf` | 只读检查，打印 `[OK]` / `[WOULD]` / `[SKIP]`；不运行 npm、不建目录、不注册、不写状态、不跑 `mcp list`；**即使指定 `-LogPath` 也不创建日志目录或文件** |
 | `-ConfigPath <path>` | 指定配置文件（默认 `~/.remote-mcp/config.yaml`），注册时使用其绝对路径 |
 | `-NoConfig` | 不生成配置；仍会复制配置样例 |
 | `-SkipDeps` | 跳过 `npm ci` |
@@ -78,7 +82,7 @@ node .\dist\cli.js credential set sudo.web1
 | `-SkipRegister` | 不更新 MCP 注册 |
 | `-NoVerify` | 跳过 `claude mcp list` 健康检查 |
 | `-NodePath <path>` | 指定 `node.exe`（默认从 PATH 解析） |
-| `-LogPath <file>` | 追加安装日志到指定文件 |
+| `-LogPath <file>` | 追加安装日志到指定文件；仅真实安装时写入，`-DryRun` 下忽略（严格零写入） |
 
 ### uninstall.ps1
 
@@ -89,17 +93,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
 
 # 同时删除数据目录（交互式确认）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1 -RemoveData
+
+# 追加卸载日志（仅真实运行时写入；加 -DryRun 时不会创建该日志）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1 -LogPath .\logs\uninstall.log
 ```
 
 | 参数 | 说明 |
 | --- | --- |
-| `-DryRun` / `-WhatIf` | 只读检查，不修改注册/状态/数据 |
-| `-RemoveData` | 删除数据目录（默认是 `~/.remote-mcp`） |
+| `-DryRun` / `-WhatIf` | 只读检查，不修改注册/状态/数据；**即使指定 `-LogPath` 也不创建日志目录或文件** |
+| `-RemoveData` | 删除数据目录（默认是 `~/.remote-mcp`；数据目录 basename 必须是 `.remote-mcp`） |
 | `-Yes` | 非交互环境删除数据时必需 |
 | `-ConfigPath <path>` | 指定配置路径，从而确定数据目录 |
-| `-ForcePath` | 数据目录不在用户主目录下时，确认允许删除 |
+| `-ForcePath` | 确认允许删除非 `.remote-mcp` basename 或位于用户主目录外的数据目录；仍需通过下方安全校验 |
+| `-LogPath <file>` | 追加卸载日志到指定文件；仅真实运行时写入，`-DryRun` 下忽略（严格零写入） |
 
-`-RemoveData` 会先做安全校验：拒绝盘符根目录、用户主目录、仓库根目录及其上级、重解析点（符号链接/联接），以及 `~/.ssh`、`~/.claude`、`dist`、`node_modules`、`src` 等受保护目录。
+`-RemoveData` 会先做安全校验：数据目录 basename 必须是 `.remote-mcp`（否则必须显式 `-ForcePath`）；
+同时拒绝盘符根目录、用户主目录、仓库根目录及其上级、重解析点（符号链接/联接），以及 `~/.ssh`、`~/.claude`、`dist`、`node_modules`、`src` 等受保护目录。
+`-ForcePath` 只跳过 basename 与“不在用户主目录下”两项检查，其余安全校验仍然生效。
 按配置中的 `credential` 引用尽力执行 `credential delete`；不会删除 `~/.ssh`、`dist` 或 `node_modules`。
 
 ### 退出码
