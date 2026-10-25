@@ -50,6 +50,9 @@ describe('createAuditSink', () => {
       dir,
       log,
       now: () => new Date('2026-10-24T00:00:00.000Z'),
+      // 本用例只验证并发串行化；假时钟与真实文件 mtime 的日期差会在每次
+      // 追加前触发按日期轮转，把前 99 行移出活动文件。
+      dateRotate: false,
     });
 
     await Promise.all(

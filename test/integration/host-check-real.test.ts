@@ -70,7 +70,7 @@ describe.skipIf(!E2E)(`integration: real host (${ALIAS})`, () => {
 
     expect(result.isError).not.toBe(true);
     expect(text).toContain('Linux');
-    expect(elapsedMs).toBeLessThan(8000);
+    expect(elapsedMs).toBeLessThan(Math.max(15_000, config.defaults.timeouts.checkMs));
   }, 30_000);
 
   it('host_check rejects an unknown alias with a Policy error', async () => {

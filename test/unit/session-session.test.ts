@@ -346,6 +346,48 @@ describe('createSession close semantics', () => {
 
     await session.close();
   });
+
+  it('does not acquire the host lease when skipLease is set', async () => {
+    let acquires = 0;
+    const limiter = {
+      async acquire(): Promise<{ queueMs: number; release: () => void }> {
+        acquires += 1;
+        return { queueMs: 9, release: () => undefined };
+      },
+    };
+
+    const { session, transport } = makeSession({ limiter, skipLease: true });
+    const pending = session.send({ command: 'probe' });
+    await until(() => transport.written.length === 1);
+    // 外层 transfer execute 已持有租约；内部会话若再申请会在并发上限下自死锁。
+    expect(acquires).toBe(0);
+
+    transport.emit({ type: 'frame', frame: { type: 'B', seq: 1 } });
+    transport.emit({ type: 'frame', frame: { type: 'E', seq: 1, rc: 0 } });
+    const result = await pending;
+    expect(result.outcome.status).toBe('ok');
+    expect(result.queueMs).toBe(0);
+    await session.close();
+  });
+
+  it('keeps acquiring the host lease by default', async () => {
+    let acquires = 0;
+    const limiter = {
+      async acquire(): Promise<{ queueMs: number; release: () => void }> {
+        acquires += 1;
+        return { queueMs: 0, release: () => undefined };
+      },
+    };
+
+    const { session, transport } = makeSession({ limiter });
+    const pending = session.send({ command: 'one' });
+    await until(() => transport.written.length === 1);
+    expect(acquires).toBe(1);
+    transport.emit({ type: 'frame', frame: { type: 'B', seq: 1 } });
+    transport.emit({ type: 'frame', frame: { type: 'E', seq: 1, rc: 0 } });
+    await pending;
+    await session.close();
+  });
 });
 
 describe('createSession closed notification', () => {

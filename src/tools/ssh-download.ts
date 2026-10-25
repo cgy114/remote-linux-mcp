@@ -7,6 +7,7 @@ import {
   buildRemoteDenyLists,
   normalizeRemotePath,
 } from '../policy/remote-path.js';
+import { openTransferControl } from '../transfer/control.js';
 import type { TransferDeps } from '../transfer/deps.js';
 import { downloadSingleFile } from '../transfer/single-file.js';
 import { downloadTree } from '../transfer/directory.js';
@@ -111,7 +112,23 @@ export async function sshDownload(
     ctx,
     toolName: 'ssh_download',
     prepare: (target) => buildDownloadPlan(input, target),
-    execute: ({ target, plan }) => executeDownload(makeTransferDeps(target, ctx), plan),
+    execute: async ({ target, plan }) => {
+      const deps = makeTransferDeps(target, ctx);
+      // 控制面（probe/manifest/sha）走一条常驻会话；数据面（sftp/tar）仍用一次性连接。
+      // 会话不可用时 control 为 undefined，runRemoteCommand 自动回退到一次性 ssh。
+      const control = await openTransferControl({
+        target,
+        knownHostsFile: ctx.paths.knownHostsFile,
+        log: ctx.log,
+        cwd: target.host.cwd,
+      });
+      if (control !== undefined) deps.control = control;
+      try {
+        return await executeDownload(deps, plan);
+      } finally {
+        if (control !== undefined) await control.close();
+      }
+    },
     classifyFailure: (facts) => classifyTransferFacts(facts),
     auditDenied: async ({ ctx: auditCtx, error, target }) => {
       await appendTransferAudit({

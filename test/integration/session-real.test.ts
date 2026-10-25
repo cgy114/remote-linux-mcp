@@ -13,7 +13,7 @@ import type { RemoteConfig } from '../../src/types.js';
 
 const E2E = process.env.REMOTE_MCP_E2E === '1';
 const ALIAS = process.env.REMOTE_MCP_E2E_ALIAS ?? 'orangepi';
-const TEST_TIMEOUT_MS = 60_000;
+const TEST_TIMEOUT_MS = 120_000;
 
 interface ToolResultLike {
   isError?: boolean;

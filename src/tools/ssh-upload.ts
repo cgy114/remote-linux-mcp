@@ -7,6 +7,7 @@ import {
   buildRemoteDenyLists,
   normalizeRemotePath,
 } from '../policy/remote-path.js';
+import { openTransferControl } from '../transfer/control.js';
 import type { TransferDeps } from '../transfer/deps.js';
 import { assertTransferEnabled, fileLimitsFrom } from '../transfer/file-policy.js';
 import {
@@ -125,7 +126,23 @@ export async function sshUpload(
     ctx,
     toolName: 'ssh_upload',
     prepare: (target) => buildUploadPlan(input, target),
-    execute: ({ target, plan }) => executeUpload(makeTransferDeps(target, ctx), plan),
+    execute: async ({ target, plan }) => {
+      const deps = makeTransferDeps(target, ctx);
+      // 控制面（probe/verify/swap/rm）走一条常驻会话；数据面仍是一次 sftp。
+      // 会话不可用时 control 为 undefined，runRemoteCommand 自动回退到一次性 ssh。
+      const control = await openTransferControl({
+        target,
+        knownHostsFile: ctx.paths.knownHostsFile,
+        log: ctx.log,
+        cwd: target.host.cwd,
+      });
+      if (control !== undefined) deps.control = control;
+      try {
+        return await executeUpload(deps, plan);
+      } finally {
+        if (control !== undefined) await control.close();
+      }
+    },
     classifyFailure: (facts) => classifyTransferFacts(facts),
     auditDenied: async ({ ctx: auditCtx, error, target }) => {
       await appendTransferAudit({

@@ -125,4 +125,95 @@ describe('transfer deps', () => {
     await runSftpSteps(makeDeps(), []);
     expect(state.sftpInputs[0]!['stdinData']).toBe('');
   });
+
+  it('runs through the control channel when deps.control is present', async () => {
+    state.sshInputs.length = 0;
+    const calls: Array<{ command: string; opts: Record<string, unknown> }> = [];
+    const deps = makeDeps({
+      deadlineMs: Date.now() + 5000,
+      control: {
+        run: async (command: string, opts: Record<string, unknown>) => {
+          calls.push({ command, opts });
+          return { exitCode: 3, stdout: 'hello', timedOut: false, durationMs: 7 };
+        },
+      },
+    });
+
+    const run = await runRemoteCommand(deps, 'probe thing', { timeoutMs: 99_999 });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.command).toBe('probe thing');
+    // timeout 仍取 min(requested, remaining) 与 commandMs 的较小值。
+    expect(calls[0]!.opts['maxOutputBytes']).toBe(123456);
+    expect(calls[0]!.opts['timeoutMs']).toBeLessThanOrEqual(15000);
+    expect(calls[0]!.opts['timeoutMs']).toBeGreaterThan(0);
+    expect(run).toMatchObject({
+      argv: [],
+      displayCommand: 'probe thing',
+      exitCode: 3,
+      signal: null,
+      stdout: 'hello',
+      stderr: '',
+      stdoutBytes: 5,
+      stderrBytes: 0,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      timedOut: false,
+      durationMs: 7,
+    });
+    expect(state.sshInputs).toHaveLength(0);
+  });
+
+  it('maps control timeouts into RunResult without spawning ssh', async () => {
+    state.sshInputs.length = 0;
+    const deps = makeDeps({
+      control: {
+        run: async () => ({ exitCode: null, stdout: '', timedOut: true, durationMs: 42 }),
+      },
+    });
+
+    const run = await runRemoteCommand(deps, 'sleep 9');
+    expect(run.timedOut).toBe(true);
+    expect(run.exitCode).toBeNull();
+    expect(run.durationMs).toBe(42);
+    expect(state.sshInputs).toHaveLength(0);
+  });
+
+  it('reports control-channel errors as an ssh transport failure without reconnecting', async () => {
+    state.sshInputs.length = 0;
+    const deps = makeDeps({
+      control: {
+        run: async () => {
+          throw new Error('control session closed');
+        },
+      },
+    });
+
+    const run = await runRemoteCommand(deps, 'swap');
+    // 与 one-shot ssh 的非零/传输失败保持同一分类路径。
+    expect(run.exitCode).toBe(255);
+    expect(run.stderr).toBe('control session closed');
+    expect(run.stdout).toBe('');
+    expect(run.spawnError).toBeUndefined();
+    // 不在控制通道失败后回退到新连接，避免重复执行有副作用的命令。
+    expect(state.sshInputs).toHaveLength(0);
+  });
+
+  it('keeps streaming commands on one-shot ssh even with a control channel', async () => {
+    state.sshInputs.length = 0;
+    const calls: string[] = [];
+    const deps = makeDeps({
+      control: {
+        run: async (command: string) => {
+          calls.push(command);
+          return { exitCode: 0, stdout: '', timedOut: false, durationMs: 1 };
+        },
+      },
+    });
+
+    await runRemoteCommand(deps, 'tar -cf - .', { stdoutFile: 'archive.tar' });
+    expect(calls).toHaveLength(0);
+    expect(state.sshInputs).toHaveLength(1);
+    expect(state.sshInputs[0]!['stdoutFile']).toBe('archive.tar');
+  });
 });

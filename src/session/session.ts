@@ -85,6 +85,12 @@ export interface CreateSessionOptions {
   /** 未指定 maxOutputBytes 且 target 无默认值时的兜底。 */
   defaultMaxOutputBytes?: number;
   /**
+   * 为 true 时 send 不申请主机租约（queue_ms 恒为 0），由调用方在更外层持有。
+   * 仅供内部传输控制会话使用；默认 false，session_* 工具保持“每条命令占租约”
+   * 的原有语义。
+   */
+  skipLease?: boolean;
+  /**
    * 会话进入 closed 后调用一次（所有路径：显式 close、idle、timeout、
    * protocol_error、transport_exit）。幂等；异常被吞掉并记录 warn。
    */
@@ -346,56 +352,65 @@ export function createSession(opts: CreateSessionOptions): Session {
     () => handleTransportExit(),
   );
 
+  /** 在已获准（或跳过）的租约下写入并等待命令完成。 */
+  const runActive = async (cmd: ActiveCommand, queueMs: number): Promise<void> => {
+    cmd.queueMs = queueMs;
+    if (cmd.settled || state === 'closing' || state === 'closed') {
+      if (!cmd.settled) {
+        settleActive(cmd, {
+          status: 'closed',
+          seq: cmd.seq,
+          output: outcomeOutput(cmd),
+          duration_ms: durationOf(cmd),
+        });
+      }
+      return;
+    }
+
+    cmd.startedAt = Date.now();
+    cmd.written = true;
+    cmd.timer = setTimeout(() => {
+      if (cmd.settled) return;
+      settleActive(cmd, {
+        status: 'timeout',
+        seq: cmd.seq,
+        output: outcomeOutput(cmd),
+        duration_ms: durationOf(cmd),
+      });
+      void close('command_timeout');
+    }, cmd.input.timeoutMs ?? defaultTimeoutMs);
+    cmd.timer.unref?.();
+
+    try {
+      await transport.writeLine(encodeCommandLine(cmd.seq, cmd.input.command));
+      commandsRun += 1;
+    } catch (err) {
+      settleActive(cmd, {
+        status: 'error',
+        seq: cmd.seq,
+        output: outcomeOutput(cmd),
+        duration_ms: durationOf(cmd),
+        error: 'io',
+        message: err instanceof Error ? err.message : String(err),
+      });
+      void close('transport_error');
+      return;
+    }
+
+    await cmd.completion;
+  };
+
   const executeActive = async (cmd: ActiveCommand): Promise<void> => {
     try {
+      if (opts.skipLease === true) {
+        // 外层 transfer execute 已持有该 destination 的租约；内部会话不再
+        // 嵌套申请，避免同一闸门下的自死锁（并发上限为 1 时必然卡住）。
+        await runActive(cmd, 0);
+        return;
+      }
       await withHostLease(
         target.destination,
-        async (lease) => {
-          cmd.queueMs = lease.queueMs;
-          if (cmd.settled || state === 'closing' || state === 'closed') {
-            if (!cmd.settled) {
-              settleActive(cmd, {
-                status: 'closed',
-                seq: cmd.seq,
-                output: outcomeOutput(cmd),
-                duration_ms: durationOf(cmd),
-              });
-            }
-            return;
-          }
-
-          cmd.startedAt = Date.now();
-          cmd.written = true;
-          cmd.timer = setTimeout(() => {
-            if (cmd.settled) return;
-            settleActive(cmd, {
-              status: 'timeout',
-              seq: cmd.seq,
-              output: outcomeOutput(cmd),
-              duration_ms: durationOf(cmd),
-            });
-            void close('command_timeout');
-          }, cmd.input.timeoutMs ?? defaultTimeoutMs);
-          cmd.timer.unref?.();
-
-          try {
-            await transport.writeLine(encodeCommandLine(cmd.seq, cmd.input.command));
-            commandsRun += 1;
-          } catch (err) {
-            settleActive(cmd, {
-              status: 'error',
-              seq: cmd.seq,
-              output: outcomeOutput(cmd),
-              duration_ms: durationOf(cmd),
-              error: 'io',
-              message: err instanceof Error ? err.message : String(err),
-            });
-            void close('transport_error');
-            return;
-          }
-
-          await cmd.completion;
-        },
+        (lease) => runActive(cmd, lease.queueMs),
         limiter,
       );
     } catch (err) {

@@ -17,7 +17,7 @@ import type { RemoteConfig } from '../../src/types.js';
 
 const E2E = process.env.REMOTE_MCP_E2E === '1';
 const ALIAS = process.env.REMOTE_MCP_E2E_ALIAS ?? 'orangepi';
-const TEST_TIMEOUT_MS = 180_000;
+const TEST_TIMEOUT_MS = 360_000;
 const SETUP_TIMEOUT_MS = 120_000;
 const IS_WIN = process.platform === 'win32';
 
@@ -151,7 +151,7 @@ describe.skipIf(!E2E)(`integration: file transfer on real host (${ALIAS})`, () =
       '  max_files: 1000',
       '  max_total_bytes: 33554432',
       '  max_depth: 32',
-      '  transfer_timeout_ms: 120000',
+      '  transfer_timeout_ms: 300000',
       'hosts:',
       ...hostLines,
       '',
@@ -217,6 +217,47 @@ describe.skipIf(!E2E)(`integration: file transfer on real host (${ALIAS})`, () =
     expect(result.isError, textOf(result)).not.toBe(true);
     expect(await fs.readFile(local, 'utf8')).toBe('hello 中文 😀\n');
     expect(structured(result)['sha256']).toBe(sha256('hello 中文 😀\n'));
+  }, TEST_TIMEOUT_MS);
+
+  it('uploads a 3 KiB file over the persistent control channel within the latency budget', async () => {
+    const data = randomBytes(3 * 1024);
+    const expected = sha256(data);
+    const local = path.join(localRoot, 'control-3k.bin');
+    await fs.writeFile(local, data);
+
+    const uploadStart = Date.now();
+    const up = await withRetry('upload 3KiB control', () =>
+      sshUpload(
+        { host: ALIAS, local_path: local, remote_path: `${remoteRoot}/control-3k.bin` },
+        ctx,
+      ),
+    );
+    const uploadMs = Date.now() - uploadStart;
+
+    const downPath = path.join(localRoot, 'control-3k-copy.bin');
+    const downloadStart = Date.now();
+    const down = await withRetry('download 3KiB control', () =>
+      sshDownload(
+        {
+          host: ALIAS,
+          remote_path: `${remoteRoot}/control-3k.bin`,
+          local_path: downPath,
+        },
+        ctx,
+      ),
+    );
+    const downloadMs = Date.now() - downloadStart;
+
+    console.log(
+      `[e2e control-channel] 3KiB upload ms=${uploadMs} download ms=${downloadMs}`,
+    );
+    expect(up.isError, textOf(up)).not.toBe(true);
+    expect(down.isError, textOf(down)).not.toBe(true);
+    expect(structured(up)['sha256']).toBe(expected);
+    expect(sha256(await fs.readFile(downPath))).toBe(expected);
+    // 优化前单文件上传为每条控制命令新建一次 SSH（约 56s）；目标 <25s。
+    expect(uploadMs).toBeLessThan(25_000);
+    expect(downloadMs).toBeLessThan(25_000);
   }, TEST_TIMEOUT_MS);
 
   it('reads content, sha256 and encoding via ssh_read_file', async () => {

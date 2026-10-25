@@ -48,6 +48,10 @@ const state = vi.hoisted(() => {
         mode: 0o644,
       }),
     mkTransfer,
+    controlOpens: [] as Record<string, unknown>[],
+    controlCloses: 0,
+    controlHandle: undefined as unknown,
+    lastDeps: undefined as unknown,
   };
 });
 
@@ -62,24 +66,35 @@ vi.mock('../../src/pipeline/trust.js', () => ({
 }));
 
 vi.mock('../../src/transfer/single-file.js', () => ({
-  uploadSingleFile: async () => {
+  uploadSingleFile: async (input: Record<string, unknown>) => {
     state.calls.push('uploadSingleFile');
+    state.lastDeps = input['deps'];
     return state.uploadFacts();
   },
-  downloadSingleFile: async () => {
+  downloadSingleFile: async (input: Record<string, unknown>) => {
     state.calls.push('downloadSingleFile');
+    state.lastDeps = input['deps'];
     return state.downloadFacts();
   },
 }));
 
 vi.mock('../../src/transfer/directory.js', () => ({
-  uploadTree: async () => {
+  uploadTree: async (input: Record<string, unknown>) => {
     state.calls.push('uploadTree');
+    state.lastDeps = input['deps'];
     return state.uploadFacts();
   },
-  downloadTree: async () => {
+  downloadTree: async (input: Record<string, unknown>) => {
     state.calls.push('downloadTree');
+    state.lastDeps = input['deps'];
     return state.downloadFacts();
+  },
+}));
+
+vi.mock('../../src/transfer/control.js', () => ({
+  openTransferControl: async (opts: Record<string, unknown>) => {
+    state.controlOpens.push(opts);
+    return state.controlHandle;
   },
 }));
 
@@ -97,7 +112,7 @@ vi.mock('../../src/transfer/remote-file.js', () => ({
 const { buildUploadPlan, sshUpload, sshUploadInput } = await import(
   '../../src/tools/ssh-upload.js'
 );
-const { buildDownloadPlan, sshDownloadInput } = await import(
+const { buildDownloadPlan, sshDownload, sshDownloadInput } = await import(
   '../../src/tools/ssh-download.js'
 );
 const { buildReadPlan, sshReadFile, sshReadFileInput } = await import(
@@ -228,6 +243,16 @@ function reset(): void {
       targetPath: '/remote/a.txt',
       mode: 0o644,
     });
+  state.controlOpens.length = 0;
+  state.controlCloses = 0;
+  state.lastDeps = undefined;
+  state.controlHandle = {
+    sessionId: 'sess_ctrl',
+    run: async () => ({ exitCode: 0, stdout: '', timedOut: false, durationMs: 1 }),
+    close: async () => {
+      state.controlCloses += 1;
+    },
+  };
 }
 
 beforeEach(async () => {
@@ -411,6 +436,55 @@ describe('tool wiring: audit and formatting', () => {
       files: 1,
       bytes: 5,
     });
+  });
+
+  it('opens and closes one internal control channel per file/directory transfer', async () => {
+    const up = await sshUpload(
+      { host: 'web1', local_path: path.join(root, 'a.txt'), remote_path: '~/a.txt' },
+      ctx,
+    );
+    expect(up.isError).not.toBe(true);
+    expect(state.controlOpens).toHaveLength(1);
+    expect(state.controlOpens[0]).toMatchObject({
+      cwd: '~',
+      knownHostsFile: ctx.paths.knownHostsFile,
+    });
+    expect((state.lastDeps as { control?: unknown }).control).toBe(state.controlHandle);
+    expect(state.controlCloses).toBe(1);
+
+    const tree = await sshUpload(
+      {
+        host: 'web1',
+        local_path: path.join(root, 'tree'),
+        remote_path: '~/tree',
+        recursive: true,
+      },
+      ctx,
+    );
+    expect(tree.isError).not.toBe(true);
+    expect(state.controlOpens).toHaveLength(2);
+    expect((state.lastDeps as { control?: unknown }).control).toBe(state.controlHandle);
+    expect(state.controlCloses).toBe(2);
+
+    const down = await sshDownload(
+      { host: 'web1', remote_path: '~/a.txt', local_path: path.join(root, 'control-dl.txt') },
+      ctx,
+    );
+    expect(down.isError).not.toBe(true);
+    expect(state.controlOpens).toHaveLength(3);
+    expect((state.lastDeps as { control?: unknown }).control).toBe(state.controlHandle);
+    expect(state.controlCloses).toBe(3);
+  });
+
+  it('falls back to one-shot transfer when the control session is unavailable', async () => {
+    state.controlHandle = undefined;
+    const result = await sshUpload(
+      { host: 'web1', local_path: path.join(root, 'a.txt'), remote_path: '~/a.txt' },
+      ctx,
+    );
+    expect(result.isError).not.toBe(true);
+    expect((state.lastDeps as { control?: unknown }).control).toBeUndefined();
+    expect(state.controlCloses).toBe(0);
   });
 
   it('records denied calls without spawning and without content', async () => {
